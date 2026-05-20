@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets & runtime (server-local only)
+.env
+.env.local
+.env.production
+*.db
+*.sqlite3
+spirit.db
+
+# Flutter Web build (deploy separately)
+web_build/
+web_build_backup_*/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.log

@@ -1,0 +1,64 @@
+"""
+JWT 工具 — 生成和验证 token
+"""
+import uuid
+from datetime import datetime, timedelta
+from typing import Optional
+
+import jwt
+from passlib.context import CryptContext
+
+from app.config import get_settings
+
+settings = get_settings()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(user_id: str, extra_claims: Optional[dict] = None) -> str:
+    """生成 access token"""
+    now = datetime.utcnow()
+    payload = {
+        "sub": str(user_id),
+        "type": "access",
+        "iat": now,
+        "exp": now + timedelta(minutes=settings.jwt_access_token_expire_minutes),
+        "jti": str(uuid.uuid4()),
+    }
+    if extra_claims:
+        payload.update(extra_claims)
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def create_refresh_token(user_id: str) -> tuple[str, datetime]:
+    """生成 refresh token，返回 (token, expires_at)"""
+    now = datetime.utcnow()
+    expires_at = now + timedelta(days=settings.jwt_refresh_token_expire_days)
+    payload = {
+        "sub": str(user_id),
+        "type": "refresh",
+        "iat": now,
+        "exp": expires_at,
+        "jti": str(uuid.uuid4()),
+    }
+    token = jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+    return token, expires_at
+
+
+def decode_token(token: str) -> dict:
+    """
+    解码 token，返回 payload。
+    无效或过期时抛出 jwt.InvalidTokenError / jwt.ExpiredSignatureError
+    """
+    return jwt.decode(
+        token,
+        settings.jwt_secret,
+        algorithms=[settings.jwt_algorithm],
+    )
