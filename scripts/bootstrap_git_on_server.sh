@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eu
 
 : "${REPO_URL:?REPO_URL is required}"
 BRANCH="${BRANCH:-main}"

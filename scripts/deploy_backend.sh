@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eu
 BRANCH="${1:-main}"
 APP_DIR="${APP_DIR:-/app/spirit-scheduler}"
 SERVICE_NAME="${SERVICE_NAME:-spirit-scheduler}"
