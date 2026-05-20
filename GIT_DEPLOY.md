@@ -17,7 +17,16 @@ cd /app/spirit-scheduler
 bash scripts/deploy_backend.sh main
 ```
 
-若服务器访问 GitHub 超时，在开发机执行：
+若服务器访问 GitHub 超时，任选其一：
+
+**A. 开发机开代理 7897，SSH 反向隧道拉代码（推荐）**
+
+```powershell
+# 确保 Clash/V2Ray 监听 127.0.0.1:7897
+python .deploy/server_git_pull_via_proxy.py
+```
+
+**B. 整包上传（不依赖服务器访问 GitHub）**
 
 ```powershell
 python .deploy/deploy_server_from_local_git.py
