@@ -89,6 +89,7 @@ from app.routers import (
     tree,
     fruits,
     notifications,
+    weekly_focus,  # Sprint 1
 )
 
 API_V1 = "/api/v1"
@@ -109,8 +110,9 @@ app.include_router(reports.router, prefix=API_V1)
 app.include_router(tree.router, prefix=API_V1)
 app.include_router(fruits.router, prefix=API_V1)
 app.include_router(notifications.router, prefix=API_V1)
+app.include_router(weekly_focus.router, prefix=API_V1)  # Sprint 1
 
-# ===== 挂载 Flutter Web 静态文件（开发体验版） =====
+# ===== 挂载 Flutter Web 静态文件 =====
 from fastapi.staticfiles import StaticFiles
 import os
 _web_build = os.path.join(os.path.dirname(__file__), "..", "web_build")

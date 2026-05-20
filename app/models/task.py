@@ -82,6 +82,20 @@ class SubTask(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending")
     # pending / scheduled / in_progress / completed / cancelled / overdue
 
+    # ─────────────── Sprint 1: 连续完成度 ───────────────
+    completion_percent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 0/25/50/75/100 五档离散值, 由前端选择
+    # status='completed' 时默认 100; 部分完成时可设为 25/50/75
+    # 与 status 是两件事: 一个任务可以 status='in_progress' + completion_percent=60
+
+    self_reported_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 用户上次更新完成度的时间, 用于周末分析"是当天勾的还是事后补的"
+
+    quality_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 可选, 部分完成时的简短说明 (例: "读完了一半, 后半还要再花一次")
+    # 周末 LLM 分析时作为重要信号: 解释了"为什么没完成"
+    # ─────────────── end Sprint 1 ───────────────
+
     user_feedback: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # easy / just_right / hard
 

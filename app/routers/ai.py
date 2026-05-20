@@ -276,42 +276,6 @@ async def negotiate(
             task_ids = [t.id for t in (pending_tasks + in_progress)]
 
     if not task_ids:
-        topic = (body.trigger_reason or "").strip()
-        if topic:
-            engine = FreeChatEngine(async_session_factory)
-
-            async def sse_generator_free_topic():
-                try:
-                    async for event in engine.run(
-                        user_id=current_user.id,
-                        topic=topic,
-                    ):
-                        if isinstance(event, str):
-                            yield event
-                        elif hasattr(event, "to_sse"):
-                            yield event.to_sse()
-                        else:
-                            yield str(event)
-                        await asyncio.sleep(0.05)
-                except Exception as e:
-                    logger.error("negotiate_free_topic_error", error=str(e))
-                    error_event = (
-                        f"event: error\n"
-                        f"data: {json.dumps({'message': '群聊过程中出现错误', 'fallback': True}, ensure_ascii=False)}\n\n"
-                        f"event: done\n"
-                        f"data: {{}}\n\n"
-                    )
-                    yield error_event
-
-            return StreamingResponse(
-                sse_generator_free_topic(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
         return success_response(
             data={"message": "没有需要协商的任务"},
             message="当前没有待处理的任务",

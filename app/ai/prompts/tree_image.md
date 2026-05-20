@@ -1,39 +1,34 @@
-请根据用户过去一周的生活数据生成一棵象征"生活平衡"的树。
+[NO TEXT. NO WORDS. NO LABELS. NO PEOPLE. NO DECORATIONS.]
 
-<elements>
-这棵树由五种环境要素构成：
-- 阳光 = 工作与学习
-- 水 = 娱乐与放松
-- 土壤 = 身体健康
-- 空气 = 人际交往
-- 营养物质 = 兴趣爱好
-</elements>
+Generate a tree that symbolizes "life balance" based on the user's past week data.
 
-<input>
-你将获得五个 0-10 之间的评分，以及用户本周的具体行为记录（如打羽毛球、写论文、加班、和朋友聚餐、看电影、练吉他等）。评分控制整体生态强度，行为数据生成细节元素。
-</input>
+<tree_structure>
+The tree consists of five parts representing life dimensions:
+- Roots = Physical Health (Soil Spirit 🌱)
+- Trunk = Entertainment & Relaxation (Water Spirit 💧)
+- Left Branch = Work & Study (Light Spirit 💡)
+- Right Branch = Social Interaction (Air Spirit 💨)
+- Tree Canopy = Hobbies & Interests (Nutrition Spirit ✨)
+</tree_structure>
 
-<score_to_ecology>
-- 阳光高：光线强烈；过高（8以上）偏暖、略微干燥感；过低则光线昏暗
-- 水分高：有水汽或湿润感；过低则地面轻微干裂
-- 土壤高：厚实稳定；低则浅薄贫瘠
-- 空气高：画面通透，有轻微风线与飘动元素；低则空气静止
-- 营养高：枝条丰富生长；低则枝条稀疏
-- 任一维度极端失衡：画面中体现轻微生态张力，但整体仍保持治愈柔和基调
-</score_to_ecology>
+<score_mapping>
+You will receive five scores (0-10 scale) for each dimension. Scores control the tree's appearance:
+- High score (8-10): lush, full, vibrant, abundant leaves
+- Medium score (5-7): steady growth, healthy, moderate leaves
+- Low score (0-4): sparse, thin, fewer leaves
+- Imbalanced dimensions: create natural contrast but keep overall healing aesthetic
+</score_mapping>
 
 <fruit_rule>
-当任一维度评分达到 8 以上时，在树上生成"果实"。果实必须根据该维度对应的本周真实行为个性化生成：
-- 兴趣高且多次打羽毛球 → 羽毛球形态的果实
-- 工作高且写论文较多 → 抽象化的书页/纸张形态
-- 健康高且频繁跑步 → 跑鞋或运动轨迹的抽象符号
-果实为简化、扁平、象征性造型，不写实不复杂。
+When any dimension scores 8+, add simple round fruits on the corresponding part of the tree. Keep fruits stylized and minimal, not realistic.
 </fruit_rule>
 
+<art_style>
+Super cute healing illustration style. Soft pastel colors. Light muted tones. Kawaii aesthetic. Gentle and warm feeling. Round shapes. Simple minimalist style. Solid light color background (very light blue, cream, light pink, or light green).
+</art_style>
+
 <composition_rule>
-整棵树必须作为一个统一生态系统自然生长，不将不同元素机械拼贴。所有光线、水分、土壤与空气的变化共同影响同一棵树。树干、枝条、叶片、地面环境之间逻辑一致，呈现连贯合理的自然结构。不能将五个维度画成独立区域或割裂效果，所有变化在同一个完整构图中自然融合。
+The tree should look like one natural, unified tree. All parts grow harmoniously together. Do not split into separate sections. Everything blends naturally into one cohesive image.
 </composition_rule>
 
-<art_style>
-极简画风，治愈系插画，童趣，涂鸦风格，意识流，迷你世界，梦境插画，极简插画，大色块，颗粒感，增加肌理，抽象插画，扁平插画，纯色背景。
-</art_style>
+Only the tree. No other elements. No extra decorations.

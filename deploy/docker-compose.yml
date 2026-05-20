@@ -1,0 +1,104 @@
+# 精灵日程系统 - 开发环境 Docker Compose
+#
+# 用法：
+#   1. cp .env.example .env && 改里面的密钥
+#   2. docker compose up -d db redis        # 只起数据库和 Redis（API 在主机跑）
+#   3. docker compose up                    # 全部起
+#
+# 切回 SQLite：把 .env 里 DATABASE_URL 改回 sqlite+aiosqlite:///./spirit.db
+
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: spirit-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-spirit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spirit_dev_pwd}
+      POSTGRES_DB: ${POSTGRES_DB:-spirit}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-spirit}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: spirit-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: spirit-api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-spirit}:${POSTGRES_PASSWORD:-spirit_dev_pwd}@db:5432/${POSTGRES_DB:-spirit}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      JWT_SECRET: ${JWT_SECRET}
+      LLM_API_KEY: ${LLM_API_KEY}
+      APP_ENV: ${APP_ENV:-production}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: spirit-worker
+    command: celery -A app.jobs.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-spirit}:${POSTGRES_PASSWORD:-spirit_dev_pwd}@db:5432/${POSTGRES_DB:-spirit}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      LLM_API_KEY: ${LLM_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  celery-beat:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: spirit-beat
+    command: celery -A app.jobs.celery_app beat --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-spirit}:${POSTGRES_PASSWORD:-spirit_dev_pwd}@db:5432/${POSTGRES_DB:-spirit}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

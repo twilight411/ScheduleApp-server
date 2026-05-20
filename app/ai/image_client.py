@@ -61,6 +61,7 @@ class ImageClient:
         quality: Optional[str] = None,
         user_id: Optional[str] = None,
         purpose: Optional[str] = None,
+        use_pre_llm: Optional[bool] = None,
     ) -> str:
         """调用图像生成API生成图像"""
         start_time = time.time()
@@ -76,7 +77,7 @@ class ImageClient:
 
         if self.provider == "jiyun":
             # 即梦API特殊处理（异步任务模式）
-            return await self._generate_jiyun(prompt, size, purpose, start_time)
+            return await self._generate_jiyun(prompt, size, purpose, start_time, use_pre_llm)
         else:
             # OpenAI兼容API
             return await self._generate_openai_compatible(prompt, size, quality, purpose, start_time)
@@ -169,6 +170,7 @@ class ImageClient:
         size: Optional[str],
         purpose: Optional[str],
         start_time: float,
+        use_pre_llm: Optional[bool] = None,
     ) -> str:
         """调用即梦API生成图像（使用火山引擎官方SDK）"""
         try:
@@ -188,7 +190,7 @@ class ImageClient:
                 "seed": -1,
                 "width": width,
                 "height": height,
-                "use_pre_llm": True,
+                "use_pre_llm": use_pre_llm if use_pre_llm is not None else True,
             }
 
             logger.debug("jiyun_submit", body=submit_body)

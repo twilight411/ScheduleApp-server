@@ -206,13 +206,10 @@ class AuthService:
                 pass
             raise ValueError("AUTH_INVALID_TOKEN")
 
-        expires_at = stored_token.expires_at
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < datetime.now(timezone.utc):
+        if stored_token.expires_at < datetime.now(timezone.utc):
             stored_token.is_revoked = True
             await self.db.flush()
-            raise ValueError('AUTH_INVALID_TOKEN')
+            raise ValueError("AUTH_INVALID_TOKEN")
 
         user_result = await self.db.execute(
             select(User).where(

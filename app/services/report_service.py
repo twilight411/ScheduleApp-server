@@ -4,7 +4,7 @@
 Sprint C: 替换通用 Prompt 为 periph.txt #7 风格的专业周报 Prompt
   - 300-450 字叙述体，不用条列
   - 温和真实，从具体行为切入
-  - 支持从 prompts/weekly_analysis.md 加载外部 Prompt
+  - 支持从 prompts/weekly_report.md 加载外部 Prompt
 
 生成流程:
   1. calculate_all_spirits()  → 5个精灵得分
@@ -13,9 +13,11 @@ Sprint C: 替换通用 Prompt 为 periph.txt #7 风格的专业周报 Prompt
   4. llm_generate_analysis()  → AI 分析(headline、highlights、suggestions)
   5. save WeeklyReport        → 存储
 
-同时负责:
-  - 周行为摘要 (WeeklySummary) 生成
-  - 周报查询 / 最新周报 / 重新生成
+Sprint 3 增量:
+  - generate_weekly_report 中传入 focus_snapshot + quality_notes 给 _generate_analysis
+  - score_lines 增加 raw_score / focus_weight / partial 信息
+  - 新增 _collect_quality_notes 方法
+  - 新增 _format_focus_for_prompt 方法
 """
 import uuid
 from datetime import date, datetime, timedelta
@@ -29,6 +31,7 @@ from app.models.task import Task, SubTask
 from app.models.score import SpiritWeeklyScore
 from app.services.scoring_service import ScoringService, SPIRIT_CODES
 from app.services.tree_service import TreeService
+from app.services.weekly_focus_service import WeeklyFocusService
 from app.ai.llm_client import llm_client
 from app.utils.prompt_loader import load_prompt
 
@@ -48,10 +51,7 @@ class ReportService:
         self.db = db
         self.scoring_svc = ScoringService(db)
         self.tree_svc = TreeService(db)
-
-    # ========================================
-    #  生成周报
-    # ========================================
+        self.focus_svc = WeeklyFocusService(db)
 
     async def generate_weekly_report(
         self,
@@ -59,13 +59,8 @@ class ReportService:
         week_start: date,
         force: bool = False,
     ) -> WeeklyReport:
-        """
-        生成或重新生成周报。
-        force=True 时删除已有记录重新生成。
-        """
         week_end = week_start + timedelta(days=6)
 
-        # 幂等：检查是否已有周报
         if not force:
             existing = await self.get_report(user_id, week_start)
             if existing:
@@ -73,28 +68,32 @@ class ReportService:
         else:
             await self._delete_existing(user_id, week_start)
 
-        # Step 1: 打分
         scores = await self.scoring_svc.calculate_all_spirits(user_id, week_start)
 
-        # Step 2: 生命树
         tree_data = await self.tree_svc.build_tree_data(user_id, week_start)
 
-        # Step 3: 统计数据
         stats = await self._calculate_weekly_stats(user_id, week_start, week_end)
 
-        # Step 4: 总分 + 对比上周
         overall_score = await self.scoring_svc.get_overall_score(user_id, week_start)
         vs_last_week = await self._calc_vs_last_week(user_id, week_start, overall_score)
 
-        # Step 5: AI 分析
+        focus_snapshot = await self.focus_svc.get_focus_snapshot(user_id, week_start)
+        quality_notes = await self._collect_quality_notes(user_id, week_start, week_end)
+
         analysis = await self._generate_analysis(
-            scores, stats, tree_data, overall_score, vs_last_week
+            scores, stats, tree_data, overall_score, vs_last_week,
+            focus_snapshot=focus_snapshot,
+            quality_notes=quality_notes,
         )
 
-        headline = analysis.get("headline", self._fallback_headline(overall_score, vs_last_week))
+        headline = analysis.get(
+            "headline",
+            self._fallback_headline(
+                overall_score, vs_last_week, focus_snapshot.get("label")
+            ),
+        )
         suggestions = analysis.get("suggestions", [])
 
-        # Step 6: 存储
         report = WeeklyReport(
             user_id=user_id,
             week_start=week_start,
@@ -119,13 +118,7 @@ class ReportService:
 
         return report
 
-    # ========================================
-    #  查询
-    # ========================================
-
-    async def get_report(
-        self, user_id: uuid.UUID, week_start: date
-    ) -> Optional[WeeklyReport]:
+    async def get_report(self, user_id: uuid.UUID, week_start: date) -> Optional[WeeklyReport]:
         result = await self.db.execute(
             select(WeeklyReport).where(
                 WeeklyReport.user_id == user_id,
@@ -134,9 +127,7 @@ class ReportService:
         )
         return result.scalar_one_or_none()
 
-    async def get_latest_report(
-        self, user_id: uuid.UUID
-    ) -> Optional[WeeklyReport]:
+    async def get_latest_report(self, user_id: uuid.UUID) -> Optional[WeeklyReport]:
         result = await self.db.execute(
             select(WeeklyReport)
             .where(WeeklyReport.user_id == user_id)
@@ -145,34 +136,19 @@ class ReportService:
         )
         return result.scalar_one_or_none()
 
-    # ========================================
-    #  周行为摘要
-    # ========================================
-
     async def generate_weekly_summary(
-        self,
-        user_id: uuid.UUID,
-        week_start: date,
+        self, user_id: uuid.UUID, week_start: date,
     ) -> WeeklySummary:
-        """
-        生成周行为摘要（用于 Context Engineering）。
-        比周报更简洁，主要是文本叙述 + 关键事件列表。
-        """
         week_end = week_start + timedelta(days=6)
 
-        # 检查幂等
         existing = await self._get_existing_summary(user_id, week_start)
         if existing:
             return existing
 
-        # 获取本周统计
         stats = await self._calculate_weekly_stats(user_id, week_start, week_end)
         scores = await self.scoring_svc.get_week_scores(user_id, week_start)
 
-        # 关键事件
         key_events = self._extract_key_events(stats, scores)
-
-        # 生成叙述
         narrative = await self._generate_narrative(stats, scores, key_events)
 
         summary = WeeklySummary(
@@ -186,21 +162,12 @@ class ReportService:
 
         return summary
 
-    # ========================================
-    #  统计计算
-    # ========================================
-
     async def _calculate_weekly_stats(
-        self,
-        user_id: uuid.UUID,
-        week_start: date,
-        week_end: date,
+        self, user_id: uuid.UUID, week_start: date, week_end: date,
     ) -> dict:
-        """计算周统计数据"""
         ws_dt = datetime.combine(week_start, datetime.min.time())
         we_dt = datetime.combine(week_end, datetime.max.time())
 
-        # 获取本周所有子任务
         result = await self.db.execute(
             select(SubTask).join(Task).where(
                 Task.user_id == user_id,
@@ -224,7 +191,6 @@ class ReportService:
 
         completion_rate = len(completed) / total_planned if total_planned > 0 else 0
 
-        # 按精灵分类
         by_spirit = {}
         for code in SPIRIT_CODES:
             spirit_tasks = [st for st in subtasks if st.spirit == code]
@@ -237,7 +203,6 @@ class ReportService:
                 ),
             }
 
-        # 最高效的一天
         by_day: dict[str, int] = {}
         weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         for st in completed:
@@ -247,7 +212,6 @@ class ReportService:
 
         most_productive_day = max(by_day, key=by_day.get) if by_day else "N/A"
 
-        # 最高效的小时
         by_hour: dict[int, int] = {}
         for st in completed:
             if st.scheduled_start:
@@ -269,7 +233,6 @@ class ReportService:
 
     @staticmethod
     def _calc_actual_minutes(st) -> float:
-        """计算子任务实际耗时"""
         if st.scheduled_start and st.actual_end:
             delta = (st.actual_end - st.scheduled_start).total_seconds() / 60
             return max(0, delta)
@@ -278,7 +241,6 @@ class ReportService:
     async def _calc_vs_last_week(
         self, user_id: uuid.UUID, week_start: date, current_score: float
     ) -> Optional[float]:
-        """对比上周"""
         last_week = week_start - timedelta(days=7)
         last_scores = await self.scoring_svc.get_week_scores(user_id, last_week)
         if not last_scores:
@@ -287,16 +249,14 @@ class ReportService:
         total_w = 0
         weighted = 0
         for s in last_scores:
-            w = max(1, s.intensity_at_scoring)
+            base_w = max(1, s.intensity_at_scoring)
+            focus_w = float(s.focus_weight or 1.0)
+            w = base_w * focus_w
             weighted += s.score * w
             total_w += w
         last_overall = weighted / total_w if total_w else 0
 
         return round(current_score - last_overall, 1)
-
-    # ========================================
-    #  AI 分析
-    # ========================================
 
     async def _generate_analysis(
         self,
@@ -305,124 +265,253 @@ class ReportService:
         tree_data: dict,
         overall_score: float,
         vs_last_week: Optional[float],
+        focus_snapshot: Optional[dict] = None,
+        quality_notes: Optional[list[dict]] = None,
     ) -> dict:
-        """
-        LLM 生成周报分析 — Sprint C 升级版
-
-        Prompt 策略 (来自 periph.txt #7):
-          - 叙述体，300-450 字，不用条列/bullet
-          - 温和真实，从具体行为切入
-          - 不要空泛鼓励，要指出"这周你做了什么 → 带来了什么变化"
-          - 改进建议要具体到"下周 X 天做 Y"
-        """
-        # 构建上下文
-        score_lines = []
-        for s in scores:
-            name = SPIRIT_NAMES.get(s.spirit_code, s.spirit_code)
-            planned = s.task_stats.get("planned", 0)
-            completed = s.task_stats.get("completed", 0)
-            score_lines.append(
-                f"- {name}: {s.score}分({s.level}), "
-                f"设计{s.design_score}+完成{s.completion_score}+质量{s.quality_score}, "
-                f"计划{planned}个任务/完成{completed}个"
-            )
-
-        trend_str = ""
+        # 映射精灵代码到自然语言描述
+        spirit_label_map = {
+            "light": "学习工作",
+            "water": "娱乐放松",
+            "soil": "身体健康",
+            "air": "社交互动",
+            "nutrition": "兴趣爱好",
+        }
+        
+        # 构建自然语言的行为描述（不包含技术词汇）
+        behavior_lines = []
+        
+        # 先整理按方向的任务数据
+        by_spirit_data = stats.get("by_spirit", {})
+        for spirit_code in ["light", "water", "soil", "air", "nutrition"]:
+            label = spirit_label_map.get(spirit_code, spirit_code)
+            spirit_stats = by_spirit_data.get(spirit_code, {})
+            planned = spirit_stats.get("planned", 0)
+            completed = spirit_stats.get("completed", 0)
+            hours = spirit_stats.get("hours_planned", 0)
+            
+            # 收集这个方向的部分完成任务
+            partial_notes = []
+            if quality_notes:
+                for note in quality_notes:
+                    if note["spirit"] == spirit_code and 0 < note["completion_percent"] < 100:
+                        partial_notes.append(note)
+            
+            if planned > 0:
+                line = f"- {label}：计划了 {planned} 件事，完整完成 {completed} 件"
+                if hours > 0:
+                    line += f"，预计投入约 {hours} 小时"
+                if partial_notes:
+                    partial_count = len(partial_notes)
+                    line += f"，另有 {partial_count} 件做了一部分"
+                behavior_lines.append(line)
+        
+        # 统计整体完成情况
+        total_planned = stats.get("total_tasks_planned", 0)
+        total_completed = stats.get("total_tasks_completed", 0)
+        completion_rate = stats.get("completion_rate", 0)
+        most_productive_day = stats.get("most_productive_day", "N/A")
+        most_productive_hour = stats.get("most_productive_hour", 10)
+        
+        # 构建部分完成任务的说明（不带精灵名称）
+        notes_block = ""
+        if quality_notes:
+            top_notes = quality_notes[:8]
+            if top_notes:
+                note_lines = []
+                for note in top_notes:
+                    pct = note["completion_percent"]
+                    if 0 < pct < 100:
+                        note_line = f"- 《{note['title'][:30]}》：做了 {pct}%"
+                        if note["note"]:
+                            note_line += f"，你提到「{note['note'][:60]}」"
+                        note_lines.append(note_line)
+                if note_lines:
+                    notes_block = "\n部分完成的任务：\n" + "\n".join(note_lines)
+        
+        # 构建与上周的对比（不带分数）
+        trend_block = ""
         if vs_last_week is not None:
             if vs_last_week > 0:
-                trend_str = f"比上周上升 {abs(vs_last_week)} 分"
+                trend_block = "\n整体节奏比上周更饱满一些"
             elif vs_last_week < 0:
-                trend_str = f"比上周下降 {abs(vs_last_week)} 分"
+                trend_block = "\n整体节奏比上周稍缓一些"
             else:
-                trend_str = "与上周持平"
-
-        # 尝试从 prompts/weekly_analysis.md 加载外部 Prompt
+                trend_block = "\n整体节奏与上周相近"
+        
+        # 加载外部prompt
         external_prompt = load_prompt("weekly_report")
-
+        
         if external_prompt:
             system = external_prompt
         else:
-            # 内置的 periph.txt #7 风格 Prompt
-            system = """你是精灵日程系统的周报撰写者。你的任务是根据用户本周的五精灵得分和行为数据，写一份温暖真实的周报分析。
+            system = """你是精灵日程系统的周报撰写者, 一位长期陪伴用户生活的记录者。
 
-## 写作要求
-1. **叙述体**：用流畅的段落，不要使用条列、bullet point 或编号列表
-2. **300-450 字**：不多不少，像一封朋友的信
-3. **从具体行为切入**：不要说"你做得不错"，要说"你这周完成了 X 个任务中的 Y 个，特别是周三那天..."
-4. **温和真实**：好的要肯定，不足的要直说但不伤人，像一个了解你的朋友
-5. **改进建议要具体**：不要说"下周加油"，要说"下周试着在周二和周四各安排一次30分钟的运动"
+写作要求:
+- 叙述体, 300-450字, 不要 bullet/编号
+- 从具体行为切入, 不要空泛
+- 不使用"分数""维度""精灵""权重"等技术词
+- 如果用户为本周设了重点方向, 重点方向是周报主线
+- 重点方向表现好 → 肯定; 表现差 → 直接温和点出
+- 非重点低分 → 肯定取舍, 不当问题
 
-## 输出格式
-请输出 JSON：
+输出 JSON:
 {
-  "headline": "一句话标题（不超过25字，要有emoji，积极但实事求是）",
-  "narrative": "300-450字的叙述体周报正文（不含任何列表格式）",
-  "highlights": ["用一句话概括做得好的2-3个点"],
-  "improvements": ["用一句话概括需要改进的1-2个点"],
-  "patterns": ["发现的行为模式（如果有的话）"],
-  "suggestions": ["下周的2-3条具体建议，每条带时间和动作"]
-}
+  "headline": "≤25字带 emoji",
+  "narrative": "300-450字叙述",
+  "highlights": ["2-3点"],
+  "improvements": ["1-2点"],
+  "patterns": ["行为模式"],
+  "suggestions": ["下周 2-3 条具体建议"]
+}"""
+        
+        # 构建用户prompt（只包含行为数据，不包含技术词汇）
+        user_prompt = f"""本周共安排了 {total_planned} 件事，完整完成了 {total_completed} 件，完成率 {completion_rate:.0%}。
+最高效的一天是 {most_productive_day}，最高效时段是 {most_productive_hour}:00。
 
-## 重要
-narrative 字段是核心输出，必须是流畅的叙述段落，绝对不要出现 - / * / 1. 等列表标记。"""
-
-        completion_rate = stats.get("completion_rate", 0)
-        user_prompt = f"""本周总分：{overall_score} {trend_str}
-
-各精灵得分：
-{chr(10).join(score_lines)}
-
-统计：
-- 计划 {stats.get('total_tasks_planned', 0)} 个任务，完成 {stats.get('total_tasks_completed', 0)} 个
-- 完成率 {completion_rate:.0%}
-- 最高效日：{stats.get('most_productive_day', 'N/A')}
-- 最高效时段：{stats.get('most_productive_hour', 10)}:00
-- 生命树健康度：{tree_data.get('tree_health', 'N/A')}
-- 季节标签：{tree_data.get('season_label', 'N/A')}"""
-
+各方向的投入情况：
+{chr(10).join(behavior_lines)}{trend_block}{notes_block}"""
+        
+        # 如果有focus_snapshot，也用自然语言传递
+        if focus_snapshot and focus_snapshot.get("theme"):
+            label = focus_snapshot.get("label", "")
+            key_spirits = focus_snapshot.get("key_spirits") or []
+            key_labels = [spirit_label_map.get(c, c) for c in key_spirits]
+            key_str = "、".join(key_labels) if key_labels else ""
+            
+            weights = focus_snapshot.get("weights") or {}
+            higher = [spirit_label_map.get(c, c) for c, w in weights.items() if w >= 1.3]
+            lower = [spirit_label_map.get(c, c) for c, w in weights.items() if w <= 0.7]
+            
+            focus_line = f"\n\n这周你重点关注的是「{label}」"
+            if key_str:
+                focus_line += f"，主要在 {key_str} 上"
+            if higher or lower:
+                parts = []
+                if higher:
+                    parts.append(f"主动多安排了 {', '.join(higher)}")
+                if lower:
+                    parts.append(f"主动减少了 {', '.join(lower)}")
+                focus_line += f"（{'; '.join(parts)}）"
+            user_prompt += focus_line
+        
         result = await llm_client.complete_json(
             system=system,
             user=user_prompt,
             purpose="weekly_analysis",
         )
-
+        
         if result and result.get("headline"):
-            # 兼容新旧格式：如果有 narrative 但没有 highlights，从 narrative 提取
             result.setdefault("narrative", "")
             result.setdefault("highlights", [])
             result.setdefault("improvements", [])
             result.setdefault("patterns", [])
             result.setdefault("suggestions", [])
             return result
+        
+        return self._fallback_analysis(
+            scores, stats, overall_score, vs_last_week, focus_snapshot
+        )
 
-        # Fallback
-        return self._fallback_analysis(scores, stats, overall_score, vs_last_week)
+    @staticmethod
+    def _format_focus_for_prompt(focus_snapshot: Optional[dict]) -> str:
+        if not focus_snapshot or not focus_snapshot.get("theme"):
+            return ""
+
+        label = focus_snapshot.get("label", "")
+        key_spirits = focus_snapshot.get("key_spirits") or []
+        key_names = [SPIRIT_NAMES.get(c, c) for c in key_spirits]
+        key_str = "、".join(key_names) if key_names else "(无具体重点)"
+
+        weights = focus_snapshot.get("weights") or {}
+        higher = [SPIRIT_NAMES.get(c, c) for c, w in weights.items() if w >= 1.3]
+        lower = [SPIRIT_NAMES.get(c, c) for c, w in weights.items() if w <= 0.7]
+        weight_hint = ""
+        if higher or lower:
+            parts = []
+            if higher:
+                parts.append(f"主动加重: {', '.join(higher)}")
+            if lower:
+                parts.append(f"主动收敛: {', '.join(lower)}")
+            weight_hint = " (" + "; ".join(parts) + ")"
+
+        return (
+            f"\n本周用户主动设的方向: 「{label}」, 重点是 {key_str}{weight_hint}\n"
+        )
+
+    async def _collect_quality_notes(
+        self, user_id: uuid.UUID, week_start: date, week_end: date,
+    ) -> list[dict]:
+        ws_dt = datetime.combine(week_start, datetime.min.time())
+        we_dt = datetime.combine(week_end, datetime.max.time())
+
+        result = await self.db.execute(
+            select(SubTask).join(Task).where(
+                Task.user_id == user_id,
+                SubTask.scheduled_start != None,
+                SubTask.scheduled_start >= ws_dt,
+                SubTask.scheduled_start <= we_dt,
+                SubTask.quality_note != None,
+                SubTask.quality_note != "",
+            )
+        )
+        subtasks = list(result.scalars().all())
+
+        def _sort_key(st):
+            pct = st.completion_percent or 0
+            is_partial = 1 if 0 < pct < 100 else 0
+            return (-is_partial, -pct)
+
+        subtasks.sort(key=_sort_key)
+
+        return [
+            {
+                "subtask_id": str(st.id),
+                "spirit": st.spirit,
+                "title": st.title,
+                "completion_percent": st.completion_percent or 0,
+                "note": st.quality_note or "",
+            }
+            for st in subtasks
+        ]
 
     def _fallback_analysis(
-        self, scores, stats, overall_score, vs_last_week
+        self, scores, stats, overall_score, vs_last_week,
+        focus_snapshot: Optional[dict] = None,
     ) -> dict:
-        """LLM 不可用时的降级分析"""
         highlights = []
         improvements = []
         best = max(scores, key=lambda s: s.score) if scores else None
         worst = min(scores, key=lambda s: s.score) if scores else None
 
-        if best and best.score >= 70:
+        key_spirits = set((focus_snapshot or {}).get("key_spirits") or [])
+
+        key_scores = [s for s in scores if s.spirit_code in key_spirits]
+        for s in key_scores:
+            name = SPIRIT_NAMES.get(s.spirit_code, "")
+            if s.score >= 70:
+                highlights.append(f"本周重点 {name} 表现达标 ({s.score}分)")
+            elif s.score < 50:
+                improvements.append(f"本周重点 {name} 偏低 ({s.score}分), 需要重新调整节奏")
+
+        if best and best.score >= 70 and best.spirit_code not in key_spirits:
             name = SPIRIT_NAMES.get(best.spirit_code, "")
-            highlights.append(f"{name}表现出色，得分{best.score}")
+            highlights.append(f"{name}意外表现出色 ({best.score}分)")
 
         rate = stats.get("completion_rate", 0)
         if rate >= 0.8:
-            highlights.append(f"完成率达到 {rate:.0%}，执行力很强")
+            highlights.append(f"完成率达到 {rate:.0%}, 执行力很强")
         elif rate < 0.5:
-            improvements.append(f"完成率仅 {rate:.0%}，需要减少任务量或提高专注度")
+            improvements.append(f"完成率仅 {rate:.0%}, 需要减少任务量或提高专注度")
 
-        if worst and worst.score < 50:
+        if worst and worst.score < 50 and worst.spirit_code not in key_spirits:
             name = SPIRIT_NAMES.get(worst.spirit_code, "")
-            improvements.append(f"{name}得分偏低({worst.score})，需要更多关注")
+            highlights.append(f"{name}本周取舍合理, 不强求")
+
+        focus_label = (focus_snapshot or {}).get("label")
+        headline = self._fallback_headline(overall_score, vs_last_week, focus_label)
 
         return {
-            "headline": self._fallback_headline(overall_score, vs_last_week),
+            "headline": headline,
             "highlights": highlights or ["本周有所进步"],
             "improvements": improvements or ["继续保持"],
             "patterns": [],
@@ -430,30 +519,29 @@ narrative 字段是核心输出，必须是流畅的叙述段落，绝对不要�
         }
 
     @staticmethod
-    def _fallback_headline(overall: float, vs_last_week: Optional[float]) -> str:
+    def _fallback_headline(
+        overall: float,
+        vs_last_week: Optional[float],
+        focus_label: Optional[str] = None,
+    ) -> str:
+        prefix = f"「{focus_label}」 " if focus_label else ""
         if overall >= 85:
-            return "✨ 精彩的一周！继续保持！"
+            return f"✨ {prefix}精彩的一周, 继续保持!"
         elif overall >= 65:
             trend = ""
             if vs_last_week and vs_last_week > 3:
                 trend = "📈 "
-            return f"{trend}稳步前进的一周，做得不错！"
+            return f"{trend}{prefix}稳步前进的一周"
         elif overall >= 45:
-            return "💪 平稳的一周，下周争取更好"
+            return f"💪 {prefix}平稳的一周, 下周争取更好"
         else:
-            return "🌱 需要调整节奏，加油！"
-
-    # ========================================
-    #  周行为摘要辅助
-    # ========================================
+            return f"🌱 {prefix}需要调整节奏, 加油!"
 
     def _extract_key_events(
         self, stats: dict, scores: list[SpiritWeeklyScore]
     ) -> list[dict]:
-        """提取关键事件"""
         events = []
 
-        # 高分精灵
         for s in scores:
             if s.score >= 90:
                 events.append({
@@ -470,7 +558,6 @@ narrative 字段是核心输出，必须是流畅的叙述段落，绝对不要�
                     "desc": f"{SPIRIT_NAMES.get(s.spirit_code, '')}得分仅{s.score}(枯萎)",
                 })
 
-        # 完成率
         rate = stats.get("completion_rate", 0)
         if rate >= 0.9:
             events.append({"type": "high_completion", "desc": f"完成率{rate:.0%}"})
@@ -482,13 +569,11 @@ narrative 字段是核心输出，必须是流畅的叙述段落，绝对不要�
     async def _generate_narrative(
         self, stats: dict, scores: list, key_events: list
     ) -> str:
-        """生成行为摘要叙述"""
         events_str = "; ".join(e["desc"] for e in key_events[:5])
         planned = stats.get("total_tasks_planned", 0)
         completed = stats.get("total_tasks_completed", 0)
         rate = stats.get("completion_rate", 0)
 
-        # 简单模板，不调 LLM（摘要用于 Context 而非用户展示）
         narrative = (
             f"本周安排{planned}个任务，完成{completed}个(完成率{rate:.0%})。"
             f"最高效日为{stats.get('most_productive_day', 'N/A')}。"
@@ -510,7 +595,6 @@ narrative 字段是核心输出，必须是流畅的叙述段落，绝对不要�
         return result.scalar_one_or_none()
 
     async def _delete_existing(self, user_id: uuid.UUID, week_start: date):
-        """删除已有周报（重新生成时用）"""
         result = await self.db.execute(
             select(WeeklyReport).where(
                 WeeklyReport.user_id == user_id,

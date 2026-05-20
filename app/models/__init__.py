@@ -10,6 +10,7 @@ from app.models.score import SpiritWeeklyScore
 from app.models.report import WeeklyReport, WeeklySummary, MonthlyFruit, MonthlyDigest
 from app.models.notification import UserDevice, NotificationSetting, Notification
 from app.models.file_upload import FileUpload
+from app.models.weekly_focus import WeeklyFocus
 
 __all__ = [
     "User", "RefreshToken",
@@ -21,4 +22,5 @@ __all__ = [
     "WeeklyReport", "WeeklySummary", "MonthlyFruit", "MonthlyDigest",
     "UserDevice", "NotificationSetting", "Notification",
     "FileUpload",
+    "WeeklyFocus",
 ]

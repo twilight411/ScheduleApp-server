@@ -262,10 +262,14 @@ class TaskService:
         await self.db.flush()
 
         # 同时标记所有未完成子任务
+        now = datetime.now(timezone.utc)
         for st in task.subtasks:
             if st.status not in ("completed", "cancelled"):
                 st.status = "completed"
-                st.actual_end = datetime.now(timezone.utc)
+                st.actual_end = now
+                # Sprint 1: 一键完成时把所有未完成子任务的 completion_percent 也置 100
+                st.completion_percent = 100
+                st.self_reported_at = now
                 if feedback:
                     st.user_feedback = feedback
 
@@ -341,6 +345,89 @@ class TaskService:
                 except ValueError:
                     continue
         return completed
+
+    # ========================================
+    #  Sprint 1: 子任务完成度更新
+    # ========================================
+
+    async def update_subtask_completion(
+        self,
+        subtask_id: uuid.UUID,
+        user_id: uuid.UUID,
+        completion_percent: int,
+        quality_note: Optional[str] = None,
+        user_feedback: Optional[str] = None,
+        auto_advance_status: bool = True,
+    ) -> SubTask:
+        """
+        更新子任务的连续完成度 (0/25/50/75/100)。
+
+        语义:
+          - completion_percent=100: 自动 status='completed', 写 actual_end=now
+          - completion_percent in (25,50,75): 自动 status='in_progress'
+          - completion_percent=0: 不修改 status (避免一键归零误降级)
+
+        权限: 通过子任务关联的 Task.user_id 校验所属。
+        """
+        result = await self.db.execute(
+            select(SubTask).join(Task, SubTask.task_id == Task.id).where(
+                SubTask.id == subtask_id,
+                Task.user_id == user_id,
+            )
+        )
+        st = result.scalar_one_or_none()
+        if not st:
+            raise ValueError("子任务不存在或无权访问")
+
+        if completion_percent not in {0, 25, 50, 75, 100}:
+            raise ValueError(
+                f"completion_percent 必须是 0/25/50/75/100, 收到 {completion_percent}"
+            )
+
+        now = datetime.now(timezone.utc)
+
+        prev_percent = st.completion_percent or 0
+
+        st.completion_percent = completion_percent
+        st.self_reported_at = now
+        if quality_note is not None:
+            st.quality_note = quality_note or None
+        if user_feedback is not None:
+            st.user_feedback = user_feedback
+
+        if auto_advance_status:
+            if completion_percent == 100:
+                if st.status not in ("completed", "cancelled"):
+                    st.status = "completed"
+                if not st.actual_end:
+                    st.actual_end = now
+                if not st.actual_start:
+                    st.actual_start = st.scheduled_start or now
+            elif completion_percent in (25, 50, 75):
+                if st.status in ("pending", "scheduled", "overdue"):
+                    st.status = "in_progress"
+                    if not st.actual_start:
+                        st.actual_start = now
+
+        await self.db.flush()
+
+        await self.event_svc.record_event(
+            user_id,
+            "subtask_completion_updated",
+            {
+                "subtask_id": str(st.id),
+                "task_id": str(st.task_id),
+                "spirit": st.spirit,
+                "from": prev_percent,
+                "to": completion_percent,
+                "has_note": bool(quality_note),
+                "feedback": user_feedback,
+                "auto_advance_status": auto_advance_status,
+                "status_now": st.status,
+            },
+        )
+
+        return st
 
     # ========================================
     #  从对话创建任务 (Chat-to-Task)

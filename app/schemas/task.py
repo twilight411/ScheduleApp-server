@@ -1,10 +1,14 @@
 """
 任务 Schemas — 创建、更新、状态流转、Chat-to-Task
+
+Sprint 1 新增:
+  - SubTaskCompletionUpdateRequest: 更新子任务连续完成度 (0/25/50/75/100)
+  - SubTaskOut 增加 completion_percent / quality_note / user_feedback / self_reported_at 字段
 """
 import uuid
 from typing import Optional
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class TaskCreateRequest(BaseModel):
@@ -78,6 +82,56 @@ class BatchCompleteRequest(BaseModel):
 
 
 # ====================================================================
+#  Sprint 1: 子任务完成度更新
+# ====================================================================
+
+# 离散完成度档位 — 前端 UI 用五档单选, 后端强校验
+VALID_COMPLETION_PERCENTS = {0, 25, 50, 75, 100}
+VALID_USER_FEEDBACK = {"easy", "just_right", "hard"}
+
+
+class SubTaskCompletionUpdateRequest(BaseModel):
+    """
+    更新单个子任务的完成度。
+
+    字段:
+      - completion_percent: 必须是 0/25/50/75/100
+      - quality_note: 可选, 部分完成时给周末 AI 的提示
+      - user_feedback: 可选, easy/just_right/hard (沿用现有质量分维度)
+      - auto_advance_status: True 时自动联动 status:
+          completion_percent=100 → status='completed' (并写 actual_end=now)
+          completion_percent in (25,50,75) → status='in_progress'
+          completion_percent=0 → 不修改 status (避免一键归零误降级已完成的任务)
+    """
+    completion_percent: int = Field(..., description="0/25/50/75/100")
+    quality_note: Optional[str] = Field(None, max_length=500)
+    user_feedback: Optional[str] = Field(None)
+    auto_advance_status: bool = Field(
+        True, description="为 True 时根据完成度自动调整 status"
+    )
+
+    @field_validator("completion_percent")
+    @classmethod
+    def _percent_must_be_discrete(cls, v: int) -> int:
+        if v not in VALID_COMPLETION_PERCENTS:
+            raise ValueError(
+                f"completion_percent 必须是 {sorted(VALID_COMPLETION_PERCENTS)} 之一, 收到 {v}"
+            )
+        return v
+
+    @field_validator("user_feedback")
+    @classmethod
+    def _feedback_must_be_valid(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if v not in VALID_USER_FEEDBACK:
+            raise ValueError(
+                f"user_feedback 必须是 {sorted(VALID_USER_FEEDBACK)} 之一, 收到 {v!r}"
+            )
+        return v
+
+
+# ====================================================================
 #  输出
 # ====================================================================
 
@@ -93,6 +147,11 @@ class SubTaskOut(BaseModel):
     priority: str = "medium"
     spirit_tip: Optional[str] = None
     suggested_time: Optional[str] = None
+    # ─── Sprint 1 新增字段 ───
+    completion_percent: int = 0
+    quality_note: Optional[str] = None
+    user_feedback: Optional[str] = None
+    self_reported_at: Optional[str] = None
 
 
 class TaskOut(BaseModel):

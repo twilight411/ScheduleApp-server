@@ -9,6 +9,7 @@ sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0
 alembic==1.14.1
 greenlet==3.1.1
+aiosqlite==0.20.0
 
 # ===== Redis =====
 redis[hiredis]==5.2.1

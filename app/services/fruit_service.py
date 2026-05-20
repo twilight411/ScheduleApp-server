@@ -6,6 +6,14 @@ Sprint C: 升级 AI 月度叙述 Prompt（periph.txt #9 风格）
   - 像游戏 RPG 获得道具时的描述
   - 每个果实独一无二，带有"成长记忆"
 
+Sprint 3 增量:
+  - 月度总分公式: Σ(weekly_overall × focus_intensity) / Σ(focus_intensity)
+    (基调鲜明的周比"混过去的周"对月度影响更大)
+  - spirit_monthly 新增 focused_weeks / key_weeks_avg 字段
+  - spirit_monthly["_meta"] 加 theme_history / week_focus_intensities
+  - 3 个新奖项: 聚焦达人 / 节奏切换大师 / 平衡守护者
+  - AI 月度叙述 + 生图 prompt 传入 theme_history
+
 果实类型体系:
   90-100 → golden_apple  (金苹果, legendary)
   80-89  → crystal_grape (水晶葡萄, epic)
@@ -15,7 +23,8 @@ Sprint C: 升级 AI 月度叙述 Prompt（periph.txt #9 风格）
 
 趣味奖项池:
   最佳劳模、全勤之星、逆袭王者、稳如泰山、
-  最需关爱、被遗忘的、大起大落
+  最需关爱、被遗忘的、大起大落、聚焦达人、
+  节奏切换大师、平衡守护者
 """
 import uuid
 import statistics
@@ -41,9 +50,12 @@ SPIRIT_NAMES = {
     "air": "空气精灵", "nutrition": "营养精灵",
 }
 
-# ====================================================================
-#  果实类型映射
-# ====================================================================
+KEY_SPIRIT_WEIGHT_THRESHOLD = 1.3
+
+KEY_FOCUSED_WEEKS_FOR_AWARD = 3
+KEY_AVG_SCORE_FOR_AWARD = 75
+THEME_SWITCH_COUNT_FOR_AWARD = 2
+BALANCE_GUARDIAN_MIN_AVG = 70
 
 FRUIT_TYPES = [
     {
@@ -78,10 +90,6 @@ FRUIT_TYPES = [
     },
 ]
 
-# ====================================================================
-#  趣味奖项池
-# ====================================================================
-
 AWARD_POOL = [
     {"name": "最佳劳模", "condition": "completed_most", "emoji": "🏆"},
     {"name": "全勤之星", "condition": "highest_completion_rate", "emoji": "⭐"},
@@ -90,11 +98,13 @@ AWARD_POOL = [
     {"name": "最需关爱", "condition": "lowest_score", "emoji": "💝"},
     {"name": "被遗忘的", "condition": "zero_tasks", "emoji": "😢"},
     {"name": "大起大落", "condition": "most_volatile", "emoji": "🎢"},
+    {"name": "聚焦达人", "condition": "key_spirit_consistency", "emoji": "🎯"},
+    {"name": "节奏切换大师", "condition": "theme_switching_mastery", "emoji": "🌊"},
+    {"name": "平衡守护者", "condition": "balanced_excellence", "emoji": "⚖️"},
 ]
 
 
 def get_fruit_type(score: float) -> dict:
-    """根据月均分获取果实类型"""
     for ft in FRUIT_TYPES:
         if ft["min"] <= score <= ft["max"]:
             return ft
@@ -106,50 +116,33 @@ class FruitService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    # ========================================
-    #  生成月度果实
-    # ========================================
-
     async def generate_monthly_fruit(
-        self,
-        user_id: uuid.UUID,
-        month: str,
+        self, user_id: uuid.UUID, month: str,
     ) -> MonthlyFruit:
-        """
-        生成月度果实。
-
-        Args:
-            month: "YYYY-MM" 格式
-        """
-        # 幂等
         existing = await self.get_fruit(user_id, month)
         if existing:
             return existing
 
-        # 1. 获取该月所有周的精灵得分
         week_starts = self._get_month_week_starts(month)
         all_scores = await self._load_month_scores(user_id, week_starts)
 
         if not all_scores:
-            logger.info("no_scores_for_month", user_id=str(user_id), month=month)
-            # 无数据也生成一个种子果实
             return await self._create_empty_fruit(user_id, month)
 
-        # 2. 聚合各精灵月度数据
         spirit_monthly = self._aggregate_spirit_monthly(all_scores, week_starts)
 
-        # 3. 计算月均分 + 周分趋势
         weekly_overall_scores = self._calc_weekly_overalls(all_scores, week_starts)
-        overall_score = (
-            sum(weekly_overall_scores) / len(weekly_overall_scores)
-            if weekly_overall_scores else 0
+        week_focus_intensities = self._calc_week_focus_intensities(
+            all_scores, week_starts
         )
-        overall_score = round(overall_score, 1)
+        overall_score = self._calc_month_overall(
+            weekly_overall_scores, week_focus_intensities
+        )
 
-        # 4. 确定果实类型
+        theme_history = self._extract_theme_history(all_scores, week_starts)
+
         fruit_info = get_fruit_type(overall_score)
 
-        # 5. 最佳/最弱精灵
         spirit_avgs = {
             code: data.get("avg_score", 0)
             for code, data in spirit_monthly.items()
@@ -157,15 +150,23 @@ class FruitService:
         best_spirit = max(spirit_avgs, key=spirit_avgs.get) if spirit_avgs else None
         weakest_spirit = min(spirit_avgs, key=spirit_avgs.get) if spirit_avgs else None
 
-        # 6. 趣味奖项
-        awards = self._calculate_awards(spirit_monthly, all_scores, week_starts)
-
-        # 7. AI 月度叙述
-        narrative = await self._generate_narrative(
-            month, overall_score, fruit_info, spirit_monthly, awards
+        awards = self._calculate_awards(
+            spirit_monthly, all_scores, week_starts, theme_history
         )
 
-        # 8. 存储
+        narrative = await self._generate_narrative(
+            month, overall_score, fruit_info, spirit_monthly, awards,
+            theme_history=theme_history,
+        )
+
+        spirit_monthly_with_meta = dict(spirit_monthly)
+        spirit_monthly_with_meta["_meta"] = {
+            "theme_history": theme_history,
+            "week_focus_intensities": [
+                round(x, 2) for x in week_focus_intensities
+            ],
+        }
+
         fruit = MonthlyFruit(
             user_id=user_id,
             month=month,
@@ -174,7 +175,7 @@ class FruitService:
             fruit_rarity=fruit_info["rarity"],
             overall_score=overall_score,
             weekly_scores=weekly_overall_scores,
-            spirit_monthly=spirit_monthly,
+            spirit_monthly=spirit_monthly_with_meta,
             best_spirit=best_spirit,
             weakest_spirit=weakest_spirit,
             awards=awards,
@@ -192,13 +193,7 @@ class FruitService:
         )
         return fruit
 
-    # ========================================
-    #  查询
-    # ========================================
-
-    async def get_fruit(
-        self, user_id: uuid.UUID, month: str
-    ) -> Optional[MonthlyFruit]:
+    async def get_fruit(self, user_id: uuid.UUID, month: str) -> Optional[MonthlyFruit]:
         result = await self.db.execute(
             select(MonthlyFruit).where(
                 MonthlyFruit.user_id == user_id,
@@ -207,9 +202,7 @@ class FruitService:
         )
         return result.scalar_one_or_none()
 
-    async def get_latest_fruit(
-        self, user_id: uuid.UUID
-    ) -> Optional[MonthlyFruit]:
+    async def get_latest_fruit(self, user_id: uuid.UUID) -> Optional[MonthlyFruit]:
         result = await self.db.execute(
             select(MonthlyFruit)
             .where(MonthlyFruit.user_id == user_id)
@@ -218,10 +211,7 @@ class FruitService:
         )
         return result.scalar_one_or_none()
 
-    async def get_collection(
-        self, user_id: uuid.UUID
-    ) -> list[MonthlyFruit]:
-        """获取用户所有历史果实（果实墙）"""
+    async def get_collection(self, user_id: uuid.UUID) -> list[MonthlyFruit]:
         result = await self.db.execute(
             select(MonthlyFruit)
             .where(MonthlyFruit.user_id == user_id)
@@ -229,16 +219,9 @@ class FruitService:
         )
         return list(result.scalars().all())
 
-    # ========================================
-    #  数据聚合
-    # ========================================
-
     async def _load_month_scores(
-        self,
-        user_id: uuid.UUID,
-        week_starts: list[date],
+        self, user_id: uuid.UUID, week_starts: list[date],
     ) -> list[SpiritWeeklyScore]:
-        """加载该月所有周的精灵得分"""
         if not week_starts:
             return []
 
@@ -251,11 +234,8 @@ class FruitService:
         return list(result.scalars().all())
 
     def _aggregate_spirit_monthly(
-        self,
-        all_scores: list[SpiritWeeklyScore],
-        week_starts: list[date],
+        self, all_scores: list[SpiritWeeklyScore], week_starts: list[date],
     ) -> dict:
-        """聚合各精灵的月度数据"""
         spirit_monthly = {}
 
         for code in SPIRIT_CODES:
@@ -268,6 +248,8 @@ class FruitService:
                     "completed_tasks": 0,
                     "best_week_score": 0,
                     "worst_week_score": 0,
+                    "focused_weeks": 0,
+                    "key_weeks_avg": 0,
                 }
                 continue
 
@@ -275,7 +257,6 @@ class FruitService:
             total_tasks = sum(s.task_stats.get("planned", 0) for s in spirit_scores)
             completed_tasks = sum(s.task_stats.get("completed", 0) for s in spirit_scores)
 
-            # 趋势：对比前半月和后半月
             mid = len(scores_vals) // 2
             if mid > 0 and len(scores_vals) > 1:
                 first_half = sum(scores_vals[:mid]) / mid
@@ -285,6 +266,16 @@ class FruitService:
             else:
                 trend = "stable"
 
+            key_week_scores = [
+                s.score for s in spirit_scores
+                if float(s.focus_weight or 1.0) > KEY_SPIRIT_WEIGHT_THRESHOLD
+            ]
+            focused_weeks = len(key_week_scores)
+            key_weeks_avg = (
+                round(sum(key_week_scores) / focused_weeks, 1)
+                if focused_weeks > 0 else 0
+            )
+
             spirit_monthly[code] = {
                 "avg_score": round(sum(scores_vals) / len(scores_vals), 1),
                 "trend": trend,
@@ -292,16 +283,15 @@ class FruitService:
                 "completed_tasks": completed_tasks,
                 "best_week_score": round(max(scores_vals), 1),
                 "worst_week_score": round(min(scores_vals), 1),
+                "focused_weeks": focused_weeks,
+                "key_weeks_avg": key_weeks_avg,
             }
 
         return spirit_monthly
 
     def _calc_weekly_overalls(
-        self,
-        all_scores: list[SpiritWeeklyScore],
-        week_starts: list[date],
+        self, all_scores: list[SpiritWeeklyScore], week_starts: list[date],
     ) -> list[float]:
-        """计算每周的加权总分"""
         overalls = []
         for ws in week_starts:
             week_scores = [s for s in all_scores if s.week_start == ws]
@@ -311,7 +301,9 @@ class FruitService:
             total_w = 0
             weighted = 0
             for s in week_scores:
-                w = max(1, s.intensity_at_scoring)
+                base_w = max(1, s.intensity_at_scoring)
+                focus_w = float(s.focus_weight or 1.0)
+                w = base_w * focus_w
                 weighted += s.score * w
                 total_w += w
 
@@ -319,20 +311,89 @@ class FruitService:
 
         return overalls
 
-    # ========================================
-    #  趣味奖项
-    # ========================================
+    def _calc_week_focus_intensities(
+        self, all_scores: list[SpiritWeeklyScore], week_starts: list[date],
+    ) -> list[float]:
+        intensities = []
+        for ws in week_starts:
+            week_scores = [s for s in all_scores if s.week_start == ws]
+            if not week_scores:
+                continue
+
+            deviations = [
+                abs(float(s.focus_weight or 1.0) - 1.0)
+                for s in week_scores
+            ]
+            mean_dev = sum(deviations) / len(deviations) if deviations else 0
+            intensities.append(round(mean_dev + 1.0, 3))
+
+        return intensities
+
+    @staticmethod
+    def _calc_month_overall(
+        weekly_overall_scores: list[float],
+        week_focus_intensities: list[float],
+    ) -> float:
+        if not weekly_overall_scores:
+            return 0.0
+
+        n = min(len(weekly_overall_scores), len(week_focus_intensities))
+        if n == 0:
+            return 0.0
+
+        total_w = sum(week_focus_intensities[:n])
+        if total_w == 0:
+            return round(sum(weekly_overall_scores[:n]) / n, 1)
+
+        weighted = sum(
+            s * w for s, w in zip(weekly_overall_scores[:n], week_focus_intensities[:n])
+        )
+        return round(weighted / total_w, 1)
+
+    @staticmethod
+    def _extract_theme_history(
+        all_scores: list[SpiritWeeklyScore], week_starts: list[date],
+    ) -> dict:
+        themes_per_week = []
+        theme_counts: dict[str, int] = {}
+        for ws in week_starts:
+            week_scores = [s for s in all_scores if s.week_start == ws]
+            if not week_scores:
+                themes_per_week.append(None)
+                continue
+            theme = week_scores[0].focus_at_scoring
+            themes_per_week.append(theme)
+            key = theme if theme else "(none)"
+            theme_counts[key] = theme_counts.get(key, 0) + 1
+
+        non_none_themes = {k: v for k, v in theme_counts.items() if k != "(none)"}
+        dominant_theme = (
+            max(non_none_themes, key=non_none_themes.get)
+            if non_none_themes else None
+        )
+
+        weeks_with_focus = sum(1 for t in themes_per_week if t)
+        weeks_without_focus = sum(1 for t in themes_per_week if not t)
+        theme_switch_count = len(non_none_themes)
+
+        return {
+            "themes_per_week":     themes_per_week,
+            "theme_counts":        theme_counts,
+            "dominant_theme":      dominant_theme,
+            "weeks_with_focus":    weeks_with_focus,
+            "weeks_without_focus": weeks_without_focus,
+            "theme_switch_count":  theme_switch_count,
+        }
 
     def _calculate_awards(
         self,
         spirit_monthly: dict,
         all_scores: list[SpiritWeeklyScore],
         week_starts: list[date],
+        theme_history: Optional[dict] = None,
     ) -> list[dict]:
-        """计算趣味奖项"""
         awards = []
 
-        # 每个精灵的汇总指标
         spirit_data = {}
         for code in SPIRIT_CODES:
             data = spirit_monthly.get(code, {})
@@ -350,9 +411,10 @@ class FruitService:
                 "volatility": (
                     statistics.stdev(scores_vals) if len(scores_vals) >= 2 else 0
                 ),
+                "focused_weeks": data.get("focused_weeks", 0),
+                "key_weeks_avg": data.get("key_weeks_avg", 0),
             }
 
-        # 最佳劳模 — 完成任务数最多
         most_completed = max(
             SPIRIT_CODES,
             key=lambda c: spirit_data[c]["completed"],
@@ -367,7 +429,6 @@ class FruitService:
                 "emoji": "🏆",
             })
 
-        # 全勤之星 — 完成率最高
         highest_rate_code = max(
             [c for c in SPIRIT_CODES if spirit_data[c]["total"] > 0],
             key=lambda c: spirit_data[c]["completion_rate"],
@@ -382,7 +443,6 @@ class FruitService:
                 "emoji": "⭐",
             })
 
-        # 稳如泰山 — 周分数波动最小（至少有2周数据）
         stable_candidates = [
             c for c in SPIRIT_CODES if len(spirit_data[c]["weekly_scores"]) >= 2
         ]
@@ -396,7 +456,6 @@ class FruitService:
                     "emoji": "🪨",
                 })
 
-        # 大起大落 — 波动最大
         if stable_candidates:
             most_volatile = max(stable_candidates, key=lambda c: spirit_data[c]["volatility"])
             if spirit_data[most_volatile]["volatility"] > 20:
@@ -407,7 +466,6 @@ class FruitService:
                     "emoji": "🎢",
                 })
 
-        # 最需关爱 — 月均分最低
         lowest_code = min(SPIRIT_CODES, key=lambda c: spirit_data[c]["avg_score"])
         if spirit_data[lowest_code]["avg_score"] < 50 and spirit_data[lowest_code]["total"] > 0:
             awards.append({
@@ -417,7 +475,6 @@ class FruitService:
                 "emoji": "💝",
             })
 
-        # 被遗忘的 — 整月任务数为 0
         for code in SPIRIT_CODES:
             if spirit_data[code]["total"] == 0:
                 awards.append({
@@ -427,11 +484,66 @@ class FruitService:
                     "emoji": "😢",
                 })
 
+        for code in SPIRIT_CODES:
+            sd = spirit_data[code]
+            if (sd["focused_weeks"] >= KEY_FOCUSED_WEEKS_FOR_AWARD
+                    and sd["key_weeks_avg"] >= KEY_AVG_SCORE_FOR_AWARD):
+                awards.append({
+                    "award_name": "聚焦达人",
+                    "spirit_code": code,
+                    "reason": (
+                        f"{sd['focused_weeks']}周定为重点, 重点周均分 {sd['key_weeks_avg']}"
+                    ),
+                    "emoji": "🎯",
+                })
+
+        if theme_history:
+            switches = theme_history.get("theme_switch_count", 0)
+            month_avg = (
+                sum(spirit_data[c]["avg_score"] for c in SPIRIT_CODES) / 5
+            )
+            if switches >= THEME_SWITCH_COUNT_FOR_AWARD and month_avg >= 70:
+                dominant = theme_history.get("dominant_theme")
+                awards.append({
+                    "award_name": "节奏切换大师",
+                    "spirit_code": None,
+                    "reason": (
+                        f"本月在 {switches} 种基调间切换, 月均分 {month_avg:.1f}, "
+                        f"主基调: {dominant or '混合'}"
+                    ),
+                    "emoji": "🌊",
+                })
+
+        if theme_history:
+            weeks_with_focus = theme_history.get("weeks_with_focus", 0)
+            if weeks_with_focus == 0:
+                min_avg = min(spirit_data[c]["avg_score"] for c in SPIRIT_CODES)
+                avg_of_all = (
+                    sum(spirit_data[c]["avg_score"] for c in SPIRIT_CODES) / 5
+                )
+                if (avg_of_all >= BALANCE_GUARDIAN_MIN_AVG
+                        and min_avg >= BALANCE_GUARDIAN_MIN_AVG - 10):
+                    awards.append({
+                        "award_name": "平衡守护者",
+                        "spirit_code": None,
+                        "reason": (
+                            f"整月未设重点, 五维均分 {avg_of_all:.1f}, "
+                            f"最低也有 {min_avg:.1f}"
+                        ),
+                        "emoji": "⚖️",
+                    })
+
         return awards
 
-    # ========================================
-    #  AI 叙述
-    # ========================================
+    THEME_LABELS_ZH = {
+        "exam_prep":      "备考冲刺",
+        "project_sprint": "项目冲刺",
+        "recovery":       "休整恢复",
+        "social":         "社交月",
+        "creative":       "兴趣深耕",
+        "balanced":       "平衡发展",
+        "custom":         "自定义",
+    }
 
     async def _generate_narrative(
         self,
@@ -440,64 +552,57 @@ class FruitService:
         fruit_info: dict,
         spirit_monthly: dict,
         awards: list[dict],
+        theme_history: Optional[dict] = None,
     ) -> str:
-        """
-        LLM 生成月度叙述 — Sprint C 升级版
-
-        Prompt 策略 (periph.txt #9):
-          - RPG 道具获得感：像游戏里拿到稀有道具的描述
-          - 果实带有"成长记忆"：基于用户本月具体行为
-          - 120-180 字，分两段：果实描述 + 成长回顾
-          - 个性化：根据最佳/最弱精灵和奖项定制
-        """
         spirit_lines = []
         for code in SPIRIT_CODES:
             data = spirit_monthly.get(code, {})
             name = SPIRIT_NAMES.get(code, code)
+            extras = []
+            fw = data.get("focused_weeks", 0)
+            if fw > 0:
+                extras.append(f"重点 {fw} 周, 重点周均 {data.get('key_weeks_avg', 0)}")
+            extra_str = f" [{', '.join(extras)}]" if extras else ""
             spirit_lines.append(
                 f"- {name}: 均分{data.get('avg_score', 0)}, "
                 f"趋势{data.get('trend', '?')}, "
-                f"完成{data.get('completed_tasks', 0)}/{data.get('total_tasks', 0)}任务"
+                f"完成{data.get('completed_tasks', 0)}/{data.get('total_tasks', 0)}任务{extra_str}"
             )
 
         awards_str = ", ".join(
-            f"{a['emoji']}{a['award_name']}({SPIRIT_NAMES.get(a['spirit_code'], '')})"
-            for a in awards[:4]
+            f"{a['emoji']}{a['award_name']}"
+            + (f"({SPIRIT_NAMES.get(a['spirit_code'], '')})"
+               if a.get('spirit_code') else "")
+            for a in awards[:6]
         ) if awards else "无"
+
+        focus_block = self._format_theme_history_for_prompt(theme_history)
 
         external_prompt = load_prompt("monthly_fruit")
 
         if external_prompt:
             system = external_prompt
         else:
-            system = f"""你是精灵日程系统的果实铸造师。每个月，用户的生命树会根据表现结出一颗独特的果实。
+            system = f"""你是精灵日程系统的果实铸造师。
+根据用户本月数据, 写一段果实叙述 (120-180字, 分两段)。
 
-## 你的任务
-根据用户本月数据，写一段果实叙述（120-180字，分两段）。
+第一段: 果实描述 (RPG 道具风格), 融入本月最突出的行为特征。
+第二段: 成长回顾 (温暖朋友视角), 一两句话回顾亮点。
 
-## 第一段：果实描述（RPG 道具风格）
-- 像游戏里获得稀有道具时的描述文字
-- 描述果实的外观、质地、光泽
-- 融入用户最突出的行为特征（如"表面刻着每一次准时完成的细纹"）
-- 果实品质: {fruit_info['name']}({fruit_info['rarity']})
+果实品质: {fruit_info['name']}({fruit_info['rarity']})
+要求:
+- 不要列表
+- 不超过 180 字
+- 不要用"基调""权重""精灵"等系统词
+- 直接输出文字, 不要 JSON"""
 
-## 第二段：成长回顾（温暖朋友视角）
-- 用一两句话回顾这个月的亮点
-- 如果有明显短板，温和地提一句
-- 用"你"而不是"该用户"
-
-## 限制
-- 不要用列表或条列格式
-- 不要超过 180 字
-- 直接输出文字，不要 JSON"""
-
-        user_prompt = f"""月份：{month}
-月均分：{overall_score}，果实：{fruit_info['name']}{fruit_info['emoji']}({fruit_info['rarity']})
-
-各精灵表现：
+        user_prompt = f"""月份: {month}
+月均分: {overall_score}, 果实: {fruit_info['name']}{fruit_info['emoji']}({fruit_info['rarity']})
+{focus_block}
+各方向表现:
 {chr(10).join(spirit_lines)}
 
-获得奖项：{awards_str}"""
+获得奖项: {awards_str}"""
 
         result = await llm_client.complete(
             system=system,
@@ -510,14 +615,42 @@ class FruitService:
             return result.strip().strip('"')
 
         return self._fallback_narrative(
-            month, overall_score, fruit_info, spirit_monthly
+            month, overall_score, fruit_info, spirit_monthly,
+            theme_history=theme_history,
         )
 
-    @staticmethod
-    def _fallback_narrative(
-        month: str, overall: float, fruit_info: dict, spirit_monthly: dict
+    @classmethod
+    def _format_theme_history_for_prompt(
+        cls, theme_history: Optional[dict]
     ) -> str:
-        """降级叙述"""
+        if not theme_history:
+            return ""
+
+        counts = theme_history.get("theme_counts") or {}
+        if not counts:
+            return ""
+
+        weeks_with = theme_history.get("weeks_with_focus", 0)
+        if weeks_with == 0:
+            return "\n本月基调: 整月未设重点 (平衡发展)\n"
+
+        parts = []
+        for theme_key, count in sorted(counts.items(), key=lambda kv: -kv[1]):
+            if theme_key == "(none)":
+                if count > 0:
+                    parts.append(f"未设基调 {count} 周")
+                continue
+            label = cls.THEME_LABELS_ZH.get(theme_key, theme_key)
+            parts.append(f"{label} {count} 周")
+
+        return f"\n本月基调: {', '.join(parts)}\n"
+
+    @classmethod
+    def _fallback_narrative(
+        cls,
+        month: str, overall: float, fruit_info: dict, spirit_monthly: dict,
+        theme_history: Optional[dict] = None,
+    ) -> str:
         best_code = max(
             SPIRIT_CODES,
             key=lambda c: spirit_monthly.get(c, {}).get("avg_score", 0),
@@ -531,20 +664,30 @@ class FruitService:
         best_avg = spirit_monthly.get(best_code, {}).get("avg_score", 0)
         worst_avg = spirit_monthly.get(worst_code, {}).get("avg_score", 0)
 
-        return (
-            f"{month}的月度果实是{fruit_info['name']}{fruit_info['emoji']}。"
-            f"{best_name}表现最佳（均分{best_avg}），"
-            f"{'而' + worst_name + '需要更多关注（均分' + str(worst_avg) + '）。' if worst_avg < 60 else '整体表现不错！'}"
-            f"下个月继续加油！"
+        theme_prefix = ""
+        if theme_history:
+            dominant = theme_history.get("dominant_theme")
+            weeks_with = theme_history.get("weeks_with_focus", 0)
+            if dominant:
+                label = cls.THEME_LABELS_ZH.get(dominant, dominant)
+                theme_prefix = f"这是一个以{label}为主线的月份。"
+            elif weeks_with == 0:
+                theme_prefix = "这是一个没有刻意取舍的平衡月。"
+
+        tail = (
+            f"而{worst_name}需要更多关注 (均分{worst_avg})。"
+            if worst_avg < 60 else "整体表现不错!"
         )
 
-    # ========================================
-    #  辅助
-    # ========================================
+        return (
+            f"{theme_prefix}"
+            f"{month}的月度果实是{fruit_info['name']}{fruit_info['emoji']}。"
+            f"{best_name}表现最佳 (均分{best_avg}), {tail}"
+            f"下个月继续加油!"
+        )
 
     @staticmethod
     def _get_month_week_starts(month: str) -> list[date]:
-        """获取某月包含的所有周一日期"""
         year, mon = int(month[:4]), int(month[5:7])
         first_day = date(year, mon, 1)
         if mon == 12:
@@ -552,15 +695,11 @@ class FruitService:
         else:
             last_day = date(year, mon + 1, 1) - timedelta(days=1)
 
-        # 找到该月涉及的所有周一
-        # 一个周只要有任何一天落在该月就算
         week_starts = []
-        # 从该月第一天所在周的周一开始
         first_monday = first_day - timedelta(days=first_day.weekday())
         current = first_monday
         while current <= last_day:
             week_end = current + timedelta(days=6)
-            # 该周与该月有交集
             if week_end >= first_day and current <= last_day:
                 week_starts.append(current)
             current += timedelta(days=7)
@@ -570,8 +709,24 @@ class FruitService:
     async def _create_empty_fruit(
         self, user_id: uuid.UUID, month: str
     ) -> MonthlyFruit:
-        """无数据时生成种子果实"""
-        fruit_info = FRUIT_TYPES[-1]  # seed
+        fruit_info = FRUIT_TYPES[-1]
+        spirit_monthly = {c: {
+            "avg_score": 0, "trend": "stable",
+            "total_tasks": 0, "completed_tasks": 0,
+            "best_week_score": 0, "worst_week_score": 0,
+            "focused_weeks": 0, "key_weeks_avg": 0,
+        } for c in SPIRIT_CODES}
+        spirit_monthly["_meta"] = {
+            "theme_history": {
+                "themes_per_week": [],
+                "theme_counts": {},
+                "dominant_theme": None,
+                "weeks_with_focus": 0,
+                "weeks_without_focus": 0,
+                "theme_switch_count": 0,
+            },
+            "week_focus_intensities": [],
+        }
         fruit = MonthlyFruit(
             user_id=user_id,
             month=month,
@@ -580,23 +735,15 @@ class FruitService:
             fruit_rarity=fruit_info["rarity"],
             overall_score=0,
             weekly_scores=[],
-            spirit_monthly={c: {
-                "avg_score": 0, "trend": "stable",
-                "total_tasks": 0, "completed_tasks": 0,
-                "best_week_score": 0, "worst_week_score": 0,
-            } for c in SPIRIT_CODES},
+            spirit_monthly=spirit_monthly,
             best_spirit=None,
             weakest_spirit=None,
             awards=[],
-            monthly_narrative="这个月还没有数据哦，下个月开始记录你的生活吧！🌱",
+            monthly_narrative="这个月还没有数据哦, 下个月开始记录你的生活吧! 🌱",
         )
         self.db.add(fruit)
         await self.db.flush()
         return fruit
-
-    # ========================================
-    #  AI 图像生成
-    # ========================================
 
     async def generate_fruit_image(
         self,
@@ -607,17 +754,11 @@ class FruitService:
         best_spirit: str,
         awards: list[dict],
         user_id: uuid.UUID,
+        theme_history: Optional[dict] = None,
     ) -> str:
-        """
-        根据用户本月五个维度的得分生成月度果实图像。
-        
-        调用外部生图大模型API，使用 fruit_image.md 中的prompt模板。
-        果实的形态取决于本月用户五个维度的得分，特别是最佳维度。
-        """
         external_prompt = load_prompt("fruit_image")
-        
+
         if not external_prompt:
-            logger.warning("fruit_image_prompt_not_found")
             return await self._fallback_fruit_image()
 
         score_desc = []
@@ -628,13 +769,32 @@ class FruitService:
             score_desc.append(f"{name}: {avg_score}分")
 
         best_spirit_name = SPIRIT_NAMES.get(best_spirit, best_spirit) if best_spirit else "无"
-        
+
+        focus_block = ""
+        if theme_history:
+            dominant = theme_history.get("dominant_theme")
+            weeks_with = theme_history.get("weeks_with_focus", 0)
+            counts = theme_history.get("theme_counts") or {}
+            if weeks_with == 0:
+                focus_block = "\n【月度基调】整月未设重点 (平衡月)"
+            elif dominant:
+                label = self.THEME_LABELS_ZH.get(dominant, dominant)
+                count = counts.get(dominant, 0)
+                non_none = sum(v for k, v in counts.items() if k != "(none)")
+                if non_none > count:
+                    focus_block = (
+                        f"\n【月度基调】以{label}为主 ({count}周), 但存在切换 (混合月)"
+                    )
+                else:
+                    focus_block = f"\n【月度基调】{label} {count}周"
+
         user_data = (
             f"【月度果实生成】\n"
             f"- 月份: {month}\n"
             f"- 月均分: {overall_score}\n"
             f"- 果实类型: {fruit_info['name']}({fruit_info['rarity']})\n"
-            f"- 最佳维度: {best_spirit_name}\n"
+            f"- 最佳维度: {best_spirit_name}"
+            f"{focus_block}\n"
             f"\n【五维度得分】\n" + "\n".join(score_desc)
         )
 
@@ -653,5 +813,4 @@ class FruitService:
 
     @staticmethod
     async def _fallback_fruit_image() -> str:
-        """图像生成不可用时的降级方案"""
         return "https://neeko-copilot.bytedance.net/api/text_to_image?prompt=minimalist%20magical%20fruit%20illustration%20cute%20dreamy%20healing%20style&image_size=square"

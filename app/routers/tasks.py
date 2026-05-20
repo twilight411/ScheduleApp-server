@@ -27,6 +27,7 @@ from app.schemas.task import (
     ChatTaskCreateRequest,
     ChatTaskResolveRequest,
     BatchCompleteRequest,
+    SubTaskCompletionUpdateRequest,  # Sprint 1
 )
 from app.services.task_service import TaskService
 from app.services.profile_service import ProfileService
@@ -57,6 +58,11 @@ def _task_to_dict(task) -> dict:
             "priority": st.priority,
             "spirit_tip": st.spirit_tip,
             "suggested_time": st.suggested_time,
+            # ─── Sprint 1 新增 ───
+            "completion_percent": st.completion_percent or 0,
+            "quality_note": st.quality_note,
+            "user_feedback": st.user_feedback,
+            "self_reported_at": st.self_reported_at.isoformat() if st.self_reported_at else None,
         })
     return {
         "id": str(task.id),
@@ -671,6 +677,73 @@ async def create_from_free_chat(
         "scheduled": scheduled,
         "schedule_info": schedule_info,
     })
+
+
+# ========================================
+#  Sprint 1: 子任务完成度
+# ========================================
+
+def _subtask_to_dict(st) -> dict:
+    """单个子任务序列化"""
+    return {
+        "id": str(st.id),
+        "task_id": str(st.task_id),
+        "spirit": st.spirit,
+        "title": st.title,
+        "duration_minutes": st.duration_minutes,
+        "scheduled_start": st.scheduled_start.isoformat() if st.scheduled_start else None,
+        "scheduled_end": st.scheduled_end.isoformat() if st.scheduled_end else None,
+        "status": st.status,
+        "priority": st.priority,
+        "spirit_tip": st.spirit_tip,
+        "suggested_time": st.suggested_time,
+        "completion_percent": st.completion_percent or 0,
+        "quality_note": st.quality_note,
+        "user_feedback": st.user_feedback,
+        "self_reported_at": st.self_reported_at.isoformat() if st.self_reported_at else None,
+        "actual_start": st.actual_start.isoformat() if st.actual_start else None,
+        "actual_end": st.actual_end.isoformat() if st.actual_end else None,
+    }
+
+
+@router.patch("/subtasks/{subtask_id}/completion")
+async def update_subtask_completion(
+    subtask_id: uuid.UUID,
+    body: SubTaskCompletionUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    更新单个子任务的连续完成度。
+
+    Body:
+      completion_percent: 0 / 25 / 50 / 75 / 100  (必填)
+      quality_note:       部分完成时的说明                   (可选, 给周末 AI)
+      user_feedback:      easy / just_right / hard           (可选)
+      auto_advance_status: 默认 True, 由完成度自动联动 status
+
+    返回更新后的 SubTask。
+    """
+    svc = TaskService(db)
+    try:
+        st = await svc.update_subtask_completion(
+            subtask_id=subtask_id,
+            user_id=current_user.id,
+            completion_percent=body.completion_percent,
+            quality_note=body.quality_note,
+            user_feedback=body.user_feedback,
+            auto_advance_status=body.auto_advance_status,
+        )
+    except ValueError as e:
+        msg = str(e)
+        code = "RESOURCE_NOT_FOUND" if "不存在" in msg else "VALIDATION_ERROR"
+        http_code = 404 if code == "RESOURCE_NOT_FOUND" else 400
+        raise HTTPException(http_code, detail=error_response(code, msg))
+
+    return success_response(
+        data=_subtask_to_dict(st),
+        message="完成度已更新",
+    )
 
 
 # ========================================

@@ -2,23 +2,51 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual Environment
 .venv/
 venv/
+env/
 
-# Secrets & runtime (server-local only)
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
 .env
 .env.local
 .env.production
+
+# Database
 *.db
 *.sqlite3
-spirit.db
 
-# Flutter Web build (deploy separately)
-web_build/
-web_build_backup_*/
-
-# IDE / OS
-.idea/
-.vscode/
-.DS_Store
+# Logs
 *.log
+logs/
+
+# Docker
+docker-compose.override.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Certificates
+certs/
+*.pem
+*.key
+
+# Test
+.coverage
+htmlcov/
+.pytest_cache/
+
+app/files (31)/
+__MACOSX/
