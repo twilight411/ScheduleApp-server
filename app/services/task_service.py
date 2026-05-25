@@ -200,11 +200,45 @@ class TaskService:
         self, task: Task, updates: dict
     ) -> Task:
         """更新任务字段"""
+        start_iso = updates.pop("start_iso", None)
+        end_iso = updates.pop("end_iso", None)
+        if "deadline" in updates:
+            updates["deadline"] = self._parse_deadline(updates.get("deadline"))
+
         for field, value in updates.items():
             if hasattr(task, field) and value is not None:
                 setattr(task, field, value)
 
+        schedule_start = self._parse_deadline(start_iso)
+        schedule_end = self._parse_deadline(
+            end_iso or updates.get("deadline") or task.deadline
+        )
+        if schedule_start or schedule_end:
+            await self.apply_task_schedule(task, schedule_start, schedule_end)
+
         task.updated_at = datetime.now(timezone.utc)
+        await self.db.flush()
+        return task
+
+    async def apply_task_schedule(
+        self,
+        task: Task,
+        start: Optional[datetime],
+        end: Optional[datetime],
+        subtasks: Optional[list] = None,
+    ) -> Task:
+        """将客户端起止时间写入 deadline 与首个子任务排期。"""
+        if end:
+            task.deadline = end
+        sts = subtasks or list(task.subtasks or [])
+        if not sts:
+            await self.db.flush()
+            return task
+        first = sts[0]
+        if start:
+            first.scheduled_start = start
+        if end:
+            first.scheduled_end = end
         await self.db.flush()
         return task
 
@@ -410,6 +444,7 @@ class TaskService:
                         st.actual_start = now
 
         await self.db.flush()
+        await self._sync_parent_task_status_from_subtasks(st.task_id)
 
         await self.event_svc.record_event(
             user_id,
@@ -428,6 +463,25 @@ class TaskService:
         )
 
         return st
+
+    async def _sync_parent_task_status_from_subtasks(self, task_id: uuid.UUID) -> None:
+        """子任务完成度变更后，同步父任务 status（供周报/列表统计）。"""
+        result = await self.db.execute(
+            select(Task)
+            .where(Task.id == task_id)
+            .options(selectinload(Task.subtasks))
+        )
+        task = result.scalar_one_or_none()
+        if not task or not task.subtasks:
+            return
+
+        max_pct = max(st.completion_percent or 0 for st in task.subtasks)
+        if max_pct >= 100:
+            if task.status not in ("completed", "cancelled"):
+                task.status = "completed"
+        elif max_pct > 0 and task.status == "pending":
+            task.status = "in_progress"
+        await self.db.flush()
 
     # ========================================
     #  从对话创建任务 (Chat-to-Task)

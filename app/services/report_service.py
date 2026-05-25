@@ -25,6 +25,7 @@ from typing import Optional
 
 from sqlalchemy import select, func, and_, or_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.report import WeeklyReport, WeeklySummary
 from app.models.task import Task, SubTask
@@ -170,7 +171,8 @@ class ReportService:
 
         # 周报任务数：直接统计父任务（与 App 日历里创建的一条一致）
         result = await self.db.execute(
-            select(Task).where(
+            select(Task)
+            .where(
                 Task.user_id == user_id,
                 or_(
                     and_(
@@ -185,11 +187,21 @@ class ReportService:
                     ),
                 ),
             )
+            .options(selectinload(Task.subtasks))
         )
         tasks = list(result.scalars().all())
 
+        def _completion_percent(t: Task) -> int:
+            if t.status == "completed":
+                return 100
+            subs = t.subtasks or []
+            if not subs:
+                return 0
+            return max(st.completion_percent or 0 for st in subs)
+
         def _is_done(t: Task) -> bool:
-            return t.status == "completed"
+            # App 通过子任务 completion 更新进度，父任务 status 可能仍为 pending
+            return t.status == "completed" or _completion_percent(t) >= 100
 
         def _task_hours(t: Task) -> float:
             if t.estimated_hours and t.estimated_hours > 0:

@@ -35,12 +35,25 @@
 | 字段 | 规则 |
 |------|------|
 | `total_tasks_planned` | 本周纳入的父任务总数 |
-| `total_tasks_completed` | `status == "completed"` |
+| `total_tasks_completed` | 父任务 `status == "completed"`，或任一子任务 `completion_percent >= 100`（与 App 勾选进度一致） |
 | `total_tasks_cancelled` | `status == "cancelled"` |
 | 预计工时 | `estimated_hours`，缺省按 1 小时/条 |
 | 按精灵 | `primary_spirit` 分组 |
 
-子任务仍用于打分、质量备注等其它链路；**周报顶部的任务个数不再子任务聚合**。
+子任务仍用于打分、质量备注等其它链路；**周报顶部的任务条数按父任务计，完成度读子任务进度**。
+
+### 2026-05-25 补充：更新完成状态后周报不变
+
+**原因**：
+
+1. App 只调 `PATCH /tasks/subtasks/{id}/completion`，父任务 `status` 仍为 `pending`，旧统计只认 `status==completed`。
+2. `POST /reports/weekly/regenerate` 曾忽略 `week_start` 查询参数，始终重算「今天所在周」。
+
+**修复**：
+
+- `task_service.update_subtask_completion` 后同步父任务 `status`（100% → `completed`）。
+- `_calculate_weekly_stats` 用子任务 `completion_percent` 判断父任务是否完成。
+- `regenerate` / `GET weekly?refresh=true` 支持按指定周强制重算。
 
 ### 修改文件
 

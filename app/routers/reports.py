@@ -38,10 +38,11 @@ def _parse_week_start(week_start: str) -> datetime:
 @router.get("/weekly")
 async def get_weekly_report(
     week_start: str = Query(None, description="周一日期 YYYY-MM-DD"),
+    refresh: bool = Query(False, description="为 true 时强制按最新任务数据重算"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """获取周报。如果未生成则实时触发生成。"""
+    """获取周报。未生成则创建；refresh=true 时强制重算。"""
     svc = ReportService(db)
 
     if not week_start:
@@ -50,10 +51,12 @@ async def get_weekly_report(
     else:
         ws = _parse_week_start(week_start)
 
-    report = await svc.get_report(current_user.id, ws)
-    if not report:
-        report = await svc.generate_weekly_report(current_user.id, ws)
-        # ❌ 旧代码：await db.commit()
+    if refresh:
+        report = await svc.generate_weekly_report(current_user.id, ws, force=True)
+    else:
+        report = await svc.get_report(current_user.id, ws)
+        if not report:
+            report = await svc.generate_weekly_report(current_user.id, ws)
 
     return success_response(data={
         "week_start": str(report.week_start),
@@ -96,13 +99,17 @@ async def get_latest_weekly(
 
 @router.post("/weekly/regenerate")
 async def regenerate_weekly(
+    week_start: str = Query(None, description="周一日期 YYYY-MM-DD，与 App 当前查看周一致"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """强制重新生成本周周报"""
+    """强制重新生成指定周周报（默认本周）"""
     svc = ReportService(db)
-    today = datetime.now(timezone.utc).date()
-    ws = today - timedelta(days=today.weekday())
+    if not week_start:
+        today = datetime.now(timezone.utc).date()
+        ws = today - timedelta(days=today.weekday())
+    else:
+        ws = _parse_week_start(week_start)
     report = await svc.generate_weekly_report(current_user.id, ws, force=True)
     # ❌ 旧代码：await db.commit()
 
