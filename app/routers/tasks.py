@@ -42,6 +42,37 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
 
+def _merge_client_create_fields(task_data: dict, body: TaskCreateRequest) -> dict:
+    """客户端显式字段优先于 NLP 解析结果。"""
+    if body.title:
+        task_data["title"] = body.title
+    if body.primary_spirit and body.primary_spirit in VALID_SPIRIT_CODES:
+        task_data["primary_spirit"] = body.primary_spirit
+    end_raw = body.end_iso or body.deadline
+    if end_raw:
+        task_data["deadline"] = end_raw
+    return task_data
+
+
+def _fallback_parsed_from_body(body: TaskCreateRequest) -> dict:
+    """解析器无结果时，用客户端字段构造单条任务。"""
+    end_raw = body.end_iso or body.deadline
+    return {
+        "tasks": [
+            {
+                "title": body.title or body.user_input or "未命名任务",
+                "primary_spirit": body.primary_spirit or "light",
+                "deadline": end_raw,
+                "estimated_hours": body.estimated_hours or 1,
+                "priority": body.priority,
+                "raw_fragment": body.user_input or body.title or "",
+            }
+        ],
+        "overall_confidence": 1.0,
+        "suggestions": [],
+    }
+
+
 def _task_to_dict(task) -> dict:
     """将 Task ORM 对象转为响应字典"""
     subtasks = []
@@ -102,18 +133,25 @@ async def create_task(
     profile_svc = ProfileService(db)
 
     # 1. 解析自然语言
+    user_input = body.user_input or body.title or ""
     parsed = await task_parser.parse(
-        user_input=body.user_input,
+        user_input=user_input,
         user_id=str(current_user.id),
     )
+    if not parsed.get("tasks"):
+        parsed = _fallback_parsed_from_body(body)
 
     needs_clarification = any(t.get("needs_clarification") for t in parsed.get("tasks", []))
+
+    schedule_start = TaskService._parse_deadline(body.start_iso)
+    schedule_end = TaskService._parse_deadline(body.end_iso or body.deadline)
 
     # 2. 创建每个任务 + 拆解
     created_tasks = []
     aggregated_trigger: dict | None = None  # 跨多任务汇总的触发结果
 
     for task_data in parsed.get("tasks", []):
+        task_data = _merge_client_create_fields(task_data, body)
         task = await task_svc.create_task(current_user.id, task_data, source="parsed")
 
         spirit_params = await profile_svc.get_spirit_params(
@@ -133,6 +171,11 @@ async def create_task(
             user_profile=merged_params,
         )
         subtasks = await task_svc.create_subtasks(task, decomposed)
+
+        if schedule_start or schedule_end:
+            await task_svc.apply_task_schedule(
+                task, schedule_start, schedule_end, subtasks=subtasks
+            )
 
         # ===== P0 新增：检测群聊触发器 =====
         try:
@@ -248,6 +291,36 @@ async def update_task(
 
     updates = body.model_dump(exclude_unset=True)
     task = await svc.update_task(task, updates)
+    return success_response(data=_task_to_dict(task))
+
+
+@router.patch("/{task_id}/completion")
+async def update_task_completion(
+    task_id: uuid.UUID,
+    body: SubTaskCompletionUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    按父任务更新完成度（App 日历勾选 0/100 走此接口，无需子任务 id）。
+    会将 completion_percent 写入该任务下全部子任务。
+    """
+    svc = TaskService(db)
+    try:
+        task = await svc.update_task_completion(
+            task_id=task_id,
+            user_id=current_user.id,
+            completion_percent=body.completion_percent,
+            quality_note=body.quality_note,
+            user_feedback=body.user_feedback,
+            auto_advance_status=body.auto_advance_status,
+        )
+    except ValueError as e:
+        msg = str(e)
+        code = "RESOURCE_NOT_FOUND" if "不存在" in msg else "VALIDATION_ERROR"
+        http_code = 404 if code == "RESOURCE_NOT_FOUND" else 400
+        raise HTTPException(http_code, detail=error_response(code, msg))
+
     return success_response(data=_task_to_dict(task))
 
 

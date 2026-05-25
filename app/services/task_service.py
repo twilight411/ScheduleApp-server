@@ -464,6 +464,43 @@ class TaskService:
 
         return st
 
+    async def update_task_completion(
+        self,
+        task_id: uuid.UUID,
+        user_id: uuid.UUID,
+        completion_percent: int,
+        quality_note: Optional[str] = None,
+        user_feedback: Optional[str] = None,
+        auto_advance_status: bool = True,
+    ) -> Task:
+        """
+        按父任务更新完成度（日历勾选）：同步到该任务下全部子任务。
+        """
+        result = await self.db.execute(
+            select(Task)
+            .where(Task.id == task_id, Task.user_id == user_id)
+            .options(selectinload(Task.subtasks))
+        )
+        task = result.scalar_one_or_none()
+        if not task:
+            raise ValueError("任务不存在或无权访问")
+        if not task.subtasks:
+            raise ValueError("任务尚无子任务，无法更新完成度")
+
+        for st in list(task.subtasks):
+            await self.update_subtask_completion(
+                subtask_id=st.id,
+                user_id=user_id,
+                completion_percent=completion_percent,
+                quality_note=quality_note,
+                user_feedback=user_feedback,
+                auto_advance_status=auto_advance_status,
+            )
+
+        await self._sync_parent_task_status_from_subtasks(task_id)
+        await self.db.refresh(task)
+        return task
+
     async def _sync_parent_task_status_from_subtasks(self, task_id: uuid.UUID) -> None:
         """子任务完成度变更后，同步父任务 status（供周报/列表统计）。"""
         result = await self.db.execute(
