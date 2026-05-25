@@ -25,7 +25,6 @@ from typing import Optional
 
 from sqlalchemy import select, func, and_, or_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.models.report import WeeklyReport, WeeklySummary
 from app.models.task import Task, SubTask
@@ -169,70 +168,57 @@ class ReportService:
         ws_dt = datetime.combine(week_start, datetime.min.time())
         we_dt = datetime.combine(week_end, datetime.max.time())
 
-        # 含已排期子任务；也统计未排期但父任务 deadline/创建时间落在本周的子任务
+        # 周报任务数：直接统计父任务（与 App 日历里创建的一条一致）
         result = await self.db.execute(
-            select(SubTask)
-            .join(Task)
-            .where(
+            select(Task).where(
                 Task.user_id == user_id,
                 or_(
                     and_(
-                        SubTask.scheduled_start.isnot(None),
-                        SubTask.scheduled_start >= ws_dt,
-                        SubTask.scheduled_start <= we_dt,
-                    ),
-                    and_(
-                        SubTask.scheduled_start.is_(None),
                         Task.deadline.isnot(None),
                         Task.deadline >= ws_dt,
                         Task.deadline <= we_dt,
                     ),
                     and_(
-                        SubTask.scheduled_start.is_(None),
                         Task.deadline.is_(None),
                         Task.created_at >= ws_dt,
                         Task.created_at <= we_dt,
                     ),
                 ),
             )
-            .options(selectinload(SubTask.task))
         )
-        subtasks = list(result.scalars().all())
+        tasks = list(result.scalars().all())
 
-        def _is_done(st: SubTask) -> bool:
-            return st.status == "completed" or (st.completion_percent or 0) >= 100
+        def _is_done(t: Task) -> bool:
+            return t.status == "completed"
 
-        total_planned = len(subtasks)
-        completed = [st for st in subtasks if _is_done(st)]
-        cancelled = [st for st in subtasks if st.status == "cancelled"]
+        def _task_hours(t: Task) -> float:
+            if t.estimated_hours and t.estimated_hours > 0:
+                return float(t.estimated_hours)
+            return 1.0
 
-        total_hours_planned = sum(
-            (st.duration_minutes or 60) for st in subtasks
-        ) / 60
-        total_hours_actual = sum(
-            self._calc_actual_minutes(st) for st in completed
-        ) / 60
+        total_planned = len(tasks)
+        completed = [t for t in tasks if _is_done(t)]
+        cancelled = [t for t in tasks if t.status == "cancelled"]
+
+        total_hours_planned = sum(_task_hours(t) for t in tasks)
+        total_hours_actual = sum(_task_hours(t) for t in completed)
 
         completion_rate = len(completed) / total_planned if total_planned > 0 else 0
 
         by_spirit = {}
         for code in SPIRIT_CODES:
-            spirit_tasks = [st for st in subtasks if st.spirit == code]
-            spirit_completed = [st for st in spirit_tasks if _is_done(st)]
+            spirit_tasks = [t for t in tasks if t.primary_spirit == code]
+            spirit_completed = [t for t in spirit_tasks if _is_done(t)]
             by_spirit[code] = {
                 "planned": len(spirit_tasks),
                 "completed": len(spirit_completed),
-                "hours_planned": round(
-                    sum((st.duration_minutes or 60) for st in spirit_tasks) / 60, 1
-                ),
+                "hours_planned": round(sum(_task_hours(t) for t in spirit_tasks), 1),
             }
 
         by_day: dict[str, int] = {}
         weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-        for st in completed:
-            ref = st.scheduled_start
-            if not ref and st.task and st.task.deadline:
-                ref = st.task.deadline
+        for t in completed:
+            ref = t.deadline or t.created_at
             if ref:
                 day_name = weekday_names[ref.weekday()]
                 by_day[day_name] = by_day.get(day_name, 0) + 1
@@ -240,10 +226,8 @@ class ReportService:
         most_productive_day = max(by_day, key=by_day.get) if by_day else "N/A"
 
         by_hour: dict[int, int] = {}
-        for st in completed:
-            ref = st.scheduled_start
-            if not ref and st.task and st.task.deadline:
-                ref = st.task.deadline
+        for t in completed:
+            ref = t.deadline or t.created_at
             if ref:
                 h = ref.hour
                 by_hour[h] = by_hour.get(h, 0) + 1

@@ -9,81 +9,62 @@
 ## 现象
 
 1. 用户已在 App 中创建任务（`POST /api/v1/tasks` 返回 200，数据库 `tasks` 表有记录）。
-2. 点击「重新生成周报」后，周报文案像「空周/过渡」（例如 headline「这一周在安静中过渡」）。
-3. API 返回的 `stats` 中：
-   - `total_tasks_planned`: **0**
-   - `total_tasks_completed`: **0**
-4. 服务器日志显示 **确实调用了 LLM**（`purpose=weekly_analysis`），并非写死模板；模型输入为「本周安排了 0 件事」，因此生成内容空洞。
+2. 点击「重新生成周报」后，周报文案像「空周/过渡」。
+3. API 返回的 `stats` 中 `total_tasks_planned` / `total_tasks_completed` 为 **0**。
+4. 服务器日志有真实 LLM 调用（`purpose=weekly_analysis`），但输入为「本周 0 件事」。
 
-## 根因
+## 根因（历史）
 
-`ReportService._calculate_weekly_stats()` **仅统计**满足以下条件的 **子任务（SubTask）**：
+初版 `_calculate_weekly_stats()` 只统计 **子任务 SubTask**，且要求 `scheduled_start` 落在本周。App 创建的任务通常无排期子任务 → 统计为空。
 
-```python
-SubTask.scheduled_start != None
-AND scheduled_start 落在 [week_start, week_end]
-```
+中间曾改为「子任务 + deadline/created_at 兜底」，条数偏多（一条父任务拆成多条子任务），与用户在日历里看到的 **任务条数** 不一致。
 
-而当前 Flutter 创建任务链路（`/tasks` + `auto_decompose`）常见数据形态为：
+## 最终方案：直接统计父任务
 
-| 字段 | 典型值 |
-|------|--------|
-| `Task.deadline` | `null`（未写入 UI 选择的截止时间） |
-| `SubTask.scheduled_start` | `null`（AI 拆解后未自动排期） |
-| `Task.created_at` | 有值（创建时间在本周） |
+与产品一致：**用户在 App 里创建的一条 = 周报里的一条任务**。
 
-因此即使用户有 3 个父任务、10+ 子任务，统计查询结果仍为 **空集** → `total_tasks_planned = 0` → AI 周报按「无任务」生成。
+### 纳入本周的父任务（`tasks` 表）
 
-**说明**：周报不是预设文案；是 **统计口径过窄** 导致喂给模型的数据为 0。
+满足 **任一** 即可：
 
-## 验证方式（修复前）
+1. `deadline` 落在 `[week_start, week_end]`
+2. `deadline` 为空，且 `created_at` 落在本周（覆盖刚创建、尚未设截止时间的任务）
 
-```bash
-# 登录后
-curl -H "Authorization: Bearer <token>" \
-  "http://47.118.28.102:8000/api/v1/reports/weekly?week_start=2026-05-25"
-# 观察 data.stats.total_tasks_planned == 0，但 GET /tasks 有条目
-```
+### 完成 / 取消
 
-数据库（`/app/spirit-scheduler/spirit.db`）可查：`tasks` 有记录，`subtasks.scheduled_start` 多为 NULL。
+| 字段 | 规则 |
+|------|------|
+| `total_tasks_planned` | 本周纳入的父任务总数 |
+| `total_tasks_completed` | `status == "completed"` |
+| `total_tasks_cancelled` | `status == "cancelled"` |
+| 预计工时 | `estimated_hours`，缺省按 1 小时/条 |
+| 按精灵 | `primary_spirit` 分组 |
 
-## 解决方案
-
-扩展 `_calculate_weekly_stats` 的纳入规则，在 **同一用户、同一自然周** 内，子任务满足 **任一** 条件即计入「计划」：
-
-1. **已排期**：`scheduled_start` 落在 `[week_start 00:00, week_end 23:59:59]`（原逻辑保留）。
-2. **未排期 + 有 deadline**：`scheduled_start IS NULL` 且父任务 `deadline` 落在本周。
-3. **未排期 + 无 deadline**：`scheduled_start IS NULL` 且父任务 `deadline IS NULL`，且父任务 `created_at` 落在本周（覆盖 App 刚创建、尚未排期的任务）。
-
-同时：
-
-- 完成判定：`status == "completed"` **或** `completion_percent >= 100`（与打分/子任务完成接口一致）。
-- `most_productive_day/hour`：完成子任务若无 `scheduled_start`，回退使用父任务 `deadline` 作为参考时间。
+子任务仍用于打分、质量备注等其它链路；**周报顶部的任务个数不再子任务聚合**。
 
 ### 修改文件
 
 - `app/services/report_service.py` — `_calculate_weekly_stats()`
-- 新增 import：`or_`、`selectinload`
 
 ### 部署后验证
 
-1. 服务器 `git pull` + `systemctl restart spirit-scheduler`
+1. `git pull` + `systemctl restart spirit-scheduler`
 2. `POST /api/v1/reports/weekly/regenerate?week_start=<本周周一>`
-3. 确认 `stats.total_tasks_planned` ≥ 实际子任务数（未排期但本周创建的任务应计入）
-4. App 植物页重新生成周报，「任务统计」行应显示非 0
+3. 账号「雅」本周 3 条父任务时，应看到 `total_tasks_planned: 3`（不是 10+ 子任务）
+4. App 重新生成周报，「任务统计：完成 x / 计划 3」
 
-## 后续建议（非本 Bug 范围）
+## 后续建议
 
 | 项 | 说明 |
 |----|------|
-| 创建任务写 `deadline` | `POST /tasks` 应持久化 Flutter 传入的 `deadline`，便于日历与按 deadline 统计 |
-| 子任务排期 | 拆解后为子任务写入 `scheduled_start`，统计与周报会更准确 |
-| 登录后拉任务 | Flutter `TaskProvider` 在登录成功后应 `fetchRemoteTasks()`，避免仅显示空本地缓存 |
+| 写 `deadline` | 创建任务时持久化 Flutter 传入的截止时间 |
+| 父任务完成态 | 若只在子任务上勾选进度，可考虑同步更新父任务 `status` |
+| 登录后拉任务 | Flutter 登录成功后 `fetchRemoteTasks()` |
 
 ---
 
 ## 关联
 
 - 仓库：[ScheduleApp-server](https://github.com/twilight411/ScheduleApp-server)
-- 生产目录：`/app/spirit-scheduler`
-- Flutter 展示：`schedule_app_flutter/lib/utils/weekly_report_formatter.dart`（读取 `stats.total_tasks_planned`）
+- 生产：`/app/spirit-scheduler`
+- Flutter：`schedule_app_flutter/lib/utils/weekly_report_formatter.dart`
