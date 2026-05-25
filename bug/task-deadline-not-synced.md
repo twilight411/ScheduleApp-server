@@ -93,6 +93,16 @@ POST /tasks → deadline 2026-05-27T03:00:00+00:00
 PATCH /tasks/{id} → 200，deadline 2026-05-28T04:00:00+00:00
 ```
 
+## 运维：生产代码曾被回滚
+
+2026-05-25 午间核查 `/app/spirit-scheduler/app/routers/tasks.py` 时，发现线上 **未包含** `_merge_client_create_fields` / `apply_task_schedule`（与本次修复不一致），导致用户 12:07 创建的「测试任务」仅有 NLP 解析出的 `deadline`，`scheduled_start` 仍为 NULL。
+
+**处理**：使用主仓 `.deploy/deploy_task_datetime_fix.py` 重新上传 `app/schemas/task.py`、`app/services/task_service.py`、`app/routers/tasks.py` 并 `systemctl restart spirit-scheduler`。后续发布请以 [GIT_DEPLOY.md](../GIT_DEPLOY.md) 或该脚本为准，避免 `git pull` 拉取旧提交覆盖热修。
+
+## 历史数据说明
+
+修复上线**之前**已创建的任务（如「测试」「汇报项目情况」）在库中 `deadline` 多为 NULL，客户端清空缓存后仍会显示在「今天」。需用户在前端**重新保存**或运维批量补写 `deadline` / `scheduled_start`，无法仅靠新代码自动回填。
+
 ## 修改文件一览
 
 | 文件 | 变更 |
@@ -111,4 +121,5 @@ Flutter 需同时传 `start_iso`、`end_iso`、`deadline`，读回时使用 `sub
 - 仓库：[ScheduleApp-server](https://github.com/twilight411/ScheduleApp-server)
 - 生产目录：`/app/spirit-scheduler`
 - 关联 Bug：[weekly-report-task-count-zero.md](./weekly-report-task-count-zero.md)（统计口径；本 Bug 修复后 `deadline` 有值更易计入）
-- 客户端：主仓 `schedule_app_flutter/bugs-doc/task-completion-not-synced.md` — `PATCH /tasks` 失败时旧版不会上传 `subtasks/.../completion`（App 已改为完成度单独同步）
+- 客户端：主仓 `schedule_app_flutter/bugs-doc/task-date-not-synced-with-server.md`、`task-completion-not-synced.md`
+- 完成度（后端）：[task-completion-checkbox-not-synced.md](./task-completion-checkbox-not-synced.md)

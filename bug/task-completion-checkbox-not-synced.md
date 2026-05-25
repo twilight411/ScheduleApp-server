@@ -42,7 +42,21 @@
 2. 杀进程重开，仍为 100%
 3. 重新生成周报，`total_tasks_completed` 增加
 
+## 修改文件一览
+
+| 文件 | 变更 |
+|------|------|
+| `app/routers/tasks.py` | `PATCH /{task_id}/completion` |
+| `app/services/task_service.py` | `update_task_completion()`（全部子任务写入同一完成度） |
+
+## 部署
+
+与 [task-deadline-not-synced.md](./task-deadline-not-synced.md) 一并合并到 `main` 后，在 `47.118.28.102` 执行 `git pull` + `systemctl restart spirit-scheduler`，或上传上述文件热修。
+
 ## 关联
 
+- Flutter：[task-completion-not-synced.md](../../../schedule_app_flutter/bugs-doc/task-completion-not-synced.md)
 - [weekly-report-task-count-zero.md](./weekly-report-task-count-zero.md)
 - [task-deadline-not-synced.md](./task-deadline-not-synced.md)
+- [weekly-report-stale-cache.md](./weekly-report-stale-cache.md)（`PATCH /tasks` 500 会导致旧版 App 不上传完成度）
+- Flutter：主仓 `schedule_app_flutter/bugs-doc/task-completion-not-synced.md`

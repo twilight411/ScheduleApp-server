@@ -70,9 +70,9 @@
 
 | 项 | 说明 |
 |----|------|
-| 写 `deadline` | 创建任务时持久化 Flutter 传入的截止时间 |
-| 父任务完成态 | 若只在子任务上勾选进度，可考虑同步更新父任务 `status` |
-| 登录后拉任务 | Flutter 登录成功后 `fetchRemoteTasks()` |
+| 写 `deadline` | 见 [task-deadline-not-synced.md](./task-deadline-not-synced.md)（#002） |
+| 勾选上传 | 见 [task-completion-checkbox-not-synced.md](./task-completion-checkbox-not-synced.md)（#003） |
+| 重新生成周报 | 见 [weekly-report-stale-cache.md](./weekly-report-stale-cache.md)（#005） |
 
 ---
 
@@ -80,4 +80,4 @@
 
 - 仓库：[ScheduleApp-server](https://github.com/twilight411/ScheduleApp-server)
 - 生产：`/app/spirit-scheduler`
-- Flutter：`schedule_app_flutter/lib/utils/weekly_report_formatter.dart`
+- Flutter：[plant-week-report-cache.md](../../../schedule_app_flutter/bugs-doc/plant-week-report-cache.md)、[weekly_report_formatter.dart](../../../schedule_app_flutter/lib/utils/weekly_report_formatter.dart)
